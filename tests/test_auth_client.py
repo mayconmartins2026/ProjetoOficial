@@ -62,6 +62,143 @@ class AuthClientTests(unittest.TestCase):
         request = self.session.request.call_args.kwargs
         self.assertEqual(request["headers"]["Authorization"], "Bearer secret-token")
 
+    def test_create_review_sends_authenticated_review_fields(self) -> None:
+        self.session.request.return_value = self.response(
+            200, {"id": 12, "nota": 4, "comentario": "Ótimo jogo"}
+        )
+
+        result = self.api.create_review(
+            "secret-token",
+            game_name="  God of War  ",
+            rating=4,
+            review_text="  Ótimo jogo  ",
+        )
+
+        request = self.session.request.call_args
+        self.assertEqual(
+            request.args[:2],
+            ("POST", "https://example.xano.io/api:ZnpRG7wg/avalia_es"),
+        )
+        self.assertEqual(
+            request.kwargs["headers"]["Authorization"], "Bearer secret-token"
+        )
+        self.assertEqual(
+            request.kwargs["json"],
+            {
+                "nome_jogo": "God of War",
+                "nota": 4,
+                "comentario": "Ótimo jogo",
+            },
+        )
+        self.assertEqual(result["id"], 12)
+
+    def test_game_reviews_uses_game_name_as_query_parameter(self) -> None:
+        self.session.request.return_value = self.response(
+            200,
+            {
+                "avaliacoes": [
+                    {
+                        "nota": 5,
+                        "comentario": "Excelente",
+                        "_user": {"name": "May"},
+                    }
+                ]
+            },
+        )
+
+        result = self.api.game_reviews("secret-token", "God of War")
+
+        request = self.session.request.call_args
+        self.assertEqual(request.args[:2], (
+            "GET",
+            "https://example.xano.io/api:ZnpRG7wg/avaliacoes/by-game",
+        ))
+        self.assertEqual(request.kwargs["params"], {"nome_jogo": "God of War"})
+        self.assertEqual(result[0]["_user"]["name"], "May")
+
+    def test_game_reviews_reports_http_status_when_endpoint_fails(self) -> None:
+        self.session.request.return_value = self.response(500, {"message": "failed"})
+
+        with self.assertRaises(AuthAPIError) as raised:
+            self.api.game_reviews("secret-token", "God of War")
+
+        self.assertEqual(raised.exception.code, "reviews_unavailable")
+        self.assertIn("HTTP 500", raised.exception.message)
+
+    def test_game_reviews_reports_authorization_failure(self) -> None:
+        self.session.request.return_value = self.response(401, {"message": "denied"})
+
+        with self.assertRaises(AuthAPIError) as raised:
+            self.api.game_reviews("secret-token", "God of War")
+
+        self.assertEqual(raised.exception.code, "reviews_unauthorized")
+        self.assertIn("HTTP 401", raised.exception.message)
+
+    def test_game_reviews_surfaces_xano_validation_message(self) -> None:
+        self.session.request.return_value = self.response(
+            400, {"message": "Missing required input: nome_jogo"}
+        )
+
+        with self.assertRaises(AuthAPIError) as raised:
+            self.api.game_reviews("secret-token", "God of War")
+
+        self.assertIn("HTTP 400", raised.exception.message)
+        self.assertIn("nome_jogo", raised.exception.message)
+
+    def test_my_reviews_uses_authenticated_endpoint(self) -> None:
+        self.session.request.return_value = self.response(
+            200,
+            {
+                "avaliacoes": [
+                    {
+                        "nome_jogo": "God of War",
+                        "nota": 4,
+                        "comentario": "Excelente",
+                    }
+                ]
+            },
+        )
+
+        reviews = self.api.my_reviews("secret-token")
+
+        request = self.session.request.call_args
+        self.assertEqual(
+            request.args[:2],
+            ("GET", "https://example.xano.io/api:ZnpRG7wg/avaliacoes/minhas"),
+        )
+        self.assertTrue(request.kwargs["headers"]["Authorization"])
+        self.assertEqual(reviews[0]["nome_jogo"], "God of War")
+
+    def test_profile_photo_uses_multipart_upload(self) -> None:
+        self.session.request.return_value = self.response(
+            200,
+            {"id": 7, "name": "May", "img_perfil": {"path": "/vault/profile.png"}},
+        )
+
+        result = self.api.update_profile_photo(
+            "secret-token",
+            file_name="profile.png",
+            content=b"image-bytes",
+            content_type="image/png",
+        )
+
+        request = self.session.request.call_args
+        self.assertEqual(request.args[:2], (
+            "POST",
+            "https://example.xano.io/api:ZnpRG7wg/profile/photo",
+        ))
+        self.assertEqual(
+            request.kwargs["files"]["img_perfil"],
+            ("profile.png", b"image-bytes", "image/png"),
+        )
+        self.assertNotIn("json", request.kwargs)
+        self.assertNotIn("Content-Type", request.kwargs["headers"])
+        self.assertEqual(
+            self.api.public_file_url("/vault/profile.png"),
+            "https://example.xano.io/vault/profile.png",
+        )
+        self.assertEqual(result["name"], "May")
+
     def test_expired_session_has_distinct_code(self) -> None:
         self.session.request.return_value = self.response(401, {"error": "expired"})
 

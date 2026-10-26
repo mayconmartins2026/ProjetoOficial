@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import os
 import re
 from datetime import date, datetime, timezone
@@ -97,6 +98,11 @@ def _render_signup(api: AuthAPI) -> None:
         return
 
     st.session_state["auth_token"] = result.token
+    st.session_state["user_profile"] = {
+        "name": name.strip(),
+        "email": email.strip().lower(),
+    }
+    st.session_state["auth_notice"] = f"Bem-vindo, {name.strip()}!"
     st.rerun()
 
 
@@ -117,7 +123,19 @@ def _render_login(api: AuthAPI) -> None:
         st.error(error.message)
         return
 
+    try:
+        user = api.current_user(result.token)
+    except AuthAPIError:
+        user = {}
+        st.session_state["auth_notice"] = "Bem-vindo!"
+        st.session_state["auth_token"] = result.token
+        st.rerun()
+        return
+
     st.session_state["auth_token"] = result.token
+    st.session_state["user_profile"] = user
+    user_name = user.get("name") or user.get("email") or "Jogador"
+    st.session_state["auth_notice"] = f"Bem-vindo, {user_name}!"
     st.rerun()
 
 
@@ -261,14 +279,59 @@ def _traduzir_para_portugues(texto: str) -> str:
     return unescape(traducao).strip()
 
 
+def _placeholder_data_uri(label: str, *, kind: str) -> str:
+    safe_label = re.sub(r"[^A-Za-z0-9 ]+", "", label or kind).strip() or kind.title()
+    initials = safe_label[:2].upper()
+    if kind == "avatar":
+        svg = f"""
+        <svg xmlns='http://www.w3.org/2000/svg' width='320' height='320' viewBox='0 0 320 320'>
+          <defs>
+            <linearGradient id='g' x1='0%' y1='0%' x2='100%' y2='100%'>
+              <stop offset='0%' stop-color='#7c3aed'/>
+              <stop offset='100%' stop-color='#22d3ee'/>
+            </linearGradient>
+          </defs>
+          <rect width='320' height='320' rx='160' fill='url(#g)'/>
+          <circle cx='160' cy='120' r='52' fill='rgba(255,255,255,0.18)'/>
+          <path d='M80 248c18-36 54-56 80-56s62 20 80 56v26H80z' fill='rgba(255,255,255,0.18)'/>
+          <text x='160' y='284' text-anchor='middle' font-family='Arial, sans-serif' font-size='42' font-weight='700' fill='white'>{initials}</text>
+        </svg>
+        """.strip()
+    else:
+        svg = f"""
+        <svg xmlns='http://www.w3.org/2000/svg' width='640' height='360' viewBox='0 0 640 360'>
+          <defs>
+            <linearGradient id='g' x1='0%' y1='0%' x2='100%' y2='100%'>
+              <stop offset='0%' stop-color='#111827'/>
+              <stop offset='100%' stop-color='#7c3aed'/>
+            </linearGradient>
+          </defs>
+          <rect width='640' height='360' rx='28' fill='url(#g)'/>
+          <circle cx='134' cy='108' r='84' fill='rgba(255,255,255,0.08)'/>
+          <circle cx='520' cy='250' r='92' fill='rgba(34,211,238,0.12)'/>
+          <text x='320' y='192' text-anchor='middle' font-family='Arial, sans-serif' font-size='88' font-weight='800' fill='white'>{initials}</text>
+          <text x='320' y='240' text-anchor='middle' font-family='Arial, sans-serif' font-size='20' fill='rgba(255,255,255,0.8)'>{safe_label[:18]}</text>
+        </svg>
+        """.strip()
+    encoded = base64.b64encode(svg.encode("utf-8")).decode("ascii")
+    return f"data:image/svg+xml;base64,{encoded}"
+
+
 def _url_imagem_perfil(valor: Any, api: AuthAPI) -> str | None:
     if isinstance(valor, dict):
         valor = valor.get("url") or valor.get("path")
     if not isinstance(valor, str) or not valor:
-        return None
+        return _placeholder_data_uri("Usuário", kind="avatar")
     if valor.startswith(("https://", "http://")):
         return valor
     return api.public_file_url(valor)
+
+
+def _url_capa_jogo(game: dict[str, Any]) -> str:
+    cover_url = game.get("background_image")
+    if isinstance(cover_url, str) and cover_url:
+        return cover_url
+    return _placeholder_data_uri(game.get("name") or "Jogo", kind="game")
 
 
 def _format_review_date(value: Any) -> str:
@@ -371,15 +434,45 @@ def _apply_gamer_background() -> None:
         """
         <style>
         [data-testid="stAppViewContainer"] {
-            background-color: #0b0d16;
+            background-color: #090b13;
             background-image:
-                radial-gradient(ellipse at 8% 8%, rgba(121, 54, 196, 0.24), transparent 38%),
-                radial-gradient(ellipse at 92% 18%, rgba(18, 125, 190, 0.2), transparent 34%),
-                linear-gradient(145deg, #0b0d16 0%, #111426 52%, #0a101a 100%);
+                linear-gradient(130deg, rgba(15, 23, 42, 0.78), rgba(12, 18, 32, 0.72)),
+                linear-gradient(140deg, rgba(124, 58, 237, 0.22), rgba(34, 211, 238, 0.12)),
+                url("https://images.unsplash.com/photo-1542751371-adc38448a05e?auto=format&fit=crop&w=1800&q=80");
+            background-size: cover;
+            background-position: center center;
             background-attachment: fixed;
+            background-repeat: no-repeat;
+        }
+        [data-testid="stHeader"] {
+            background: transparent;
+            box-shadow: none;
         }
         [data-testid="stSidebar"] {
-            background-color: rgba(10, 12, 23, 0.92);
+            background: rgba(10, 12, 23, 0.82);
+            backdrop-filter: blur(10px);
+            border-right: 1px solid rgba(148, 163, 184, 0.15);
+        }
+        [data-testid="stImage"] img,
+        .stImage img {
+            border-radius: 18px;
+            border: 1px solid rgba(148, 163, 184, 0.2);
+            box-shadow: 0 18px 48px rgba(2, 6, 23, 0.45);
+            object-fit: cover;
+            background: linear-gradient(145deg, #1f2937, #0f172a);
+        }
+        [data-testid="stSidebar"] [data-testid="stImage"] img,
+        [data-testid="stSidebar"] .stImage img {
+            border-radius: 50%;
+        }
+        [data-testid="stImage"] img:hover,
+        .stImage img:hover {
+            transform: scale(1.02);
+            transition: transform 0.2s ease;
+        }
+        .block-container {
+            background: rgba(15, 23, 42, 0.12);
+            border-radius: 22px;
         }
         </style>
         """,
@@ -398,9 +491,8 @@ def _render_game_review(
         st.rerun()
 
     st.title(game_name)
-    cover_url = game.get("background_image")
-    if isinstance(cover_url, str) and cover_url:
-        st.image(cover_url, alt=f"Capa de {game_name}", width="stretch")
+    cover_url = _url_capa_jogo(game)
+    st.image(cover_url, alt=f"Capa de {game_name}", width="stretch")
 
     if not rawg_key:
         st.error("Configure RAWG_API_KEY para carregar o resumo do jogo.")
@@ -490,12 +582,11 @@ def _render_game_comments(
         with st.container(border=True):
             avatar_col, content_col = st.columns([1, 5])
             with avatar_col:
-                if avatar:
-                    st.image(
-                        avatar,
-                        alt=f"Foto de perfil de {username}",
-                        width=48,
-                    )
+                st.image(
+                    avatar,
+                    alt=f"Foto de perfil de {username}",
+                    width=48,
+                )
             with content_col:
                 st.markdown(f"**{username}**")
                 st.caption(f"Nota: {review.get('nota', '—')} / 5")
@@ -513,8 +604,7 @@ def _render_profile_settings(
 
     st.subheader("Foto de perfil")
     current_image = _url_imagem_perfil(user.get("img_perfil"), api)
-    if current_image:
-        st.image(current_image, alt="Sua foto de perfil", width=140)
+    st.image(current_image, alt="Sua foto de perfil", width=140)
 
     with st.form("atualizar_foto_perfil"):
         imagem = st.file_uploader(
@@ -550,6 +640,18 @@ def _render_profile_settings(
     st.rerun()
 
 
+def _clear_cached_rawg_data() -> None:
+    for func in (
+        buscar_jogos_rawg,
+        buscar_detalhes_jogo_rawg,
+        buscar_capa_jogo_rawg,
+        _traduzir_para_portugues,
+    ):
+        clear = getattr(func, "clear", None)
+        if callable(clear):
+            clear()
+
+
 def _render_my_reviews(
     api: AuthAPI, token: str, rawg_key: str | None
 ) -> None:
@@ -579,21 +681,17 @@ def _render_my_reviews(
                 cover_url = buscar_capa_jogo_rawg(rawg_key, game_name.strip())
             except (requests.RequestException, ValueError):
                 st.warning(f"Não foi possível carregar a capa de {game_name}.")
+        cover_url = cover_url or _placeholder_data_uri(game_name.strip(), kind="game")
 
         with st.container(border=True):
-            if cover_url:
-                cover_col, review_col = st.columns([1, 4])
-                with cover_col:
-                    st.image(
-                        cover_url,
-                        alt=f"Capa de {game_name}",
-                        width=100,
-                    )
-                with review_col:
-                    st.subheader(game_name)
-                    st.caption(f"Nota: {review.get('nota', '—')} / 5")
-                    st.write(review.get("comentario", ""))
-            else:
+            cover_col, review_col = st.columns([1, 4])
+            with cover_col:
+                st.image(
+                    cover_url,
+                    alt=f"Capa de {game_name}",
+                    width=100,
+                )
+            with review_col:
                 st.subheader(game_name)
                 st.caption(f"Nota: {review.get('nota', '—')} / 5")
                 st.write(review.get("comentario", ""))
@@ -603,17 +701,21 @@ def _render_my_reviews(
 def _render_authenticated(
     api: AuthAPI, token: str, rawg_key: str | None
 ) -> None:
-    try:
-        user: dict[str, Any] = api.current_user(token)
-    except AuthAPIError as error:
-        if error.code == "unauthenticated":
-            st.session_state.pop("auth_token", None)
-            st.warning(error.message)
-        else:
-            st.error(error.message)
+    cached_user = st.session_state.get("user_profile")
+    if isinstance(cached_user, dict) and cached_user:
+        user = dict(cached_user)
+    else:
+        try:
+            user = api.current_user(token)
+        except AuthAPIError as error:
+            if error.code == "unauthenticated":
+                st.session_state.pop("auth_token", None)
+                st.warning(error.message)
+            else:
+                st.error(error.message)
+                return
+            _render_auth_forms(api)
             return
-        _render_auth_forms(api)
-        return
 
     user.update(st.session_state.get("user_profile", {}))
     nome_utilizador = user.get('name') or user.get('email') or 'Jogador'
@@ -621,15 +723,18 @@ def _render_authenticated(
     # --- BARRA LATERAL (SIDEBAR) ---
     with st.sidebar:
         st.title("Menu GGReviews")
+        if st.button("Sair", width="stretch", type="primary"):
+            st.session_state.pop("auth_token", None)
+            st.rerun()
+
         avatar = _url_imagem_perfil(user.get("img_perfil"), api)
         avatar_col, greeting_col = st.columns([1, 4])
         with avatar_col:
-            if avatar:
-                st.image(
-                    avatar,
-                    alt=f"Foto de perfil de {nome_utilizador}",
-                    width=40,
-                )
+            st.image(
+                avatar,
+                alt=f"Foto de perfil de {nome_utilizador}",
+                width=40,
+            )
         with greeting_col:
             st.write(f"Olá, **{nome_utilizador}**!")
         st.divider()
@@ -644,11 +749,6 @@ def _render_authenticated(
             st.rerun()
         if st.button("⚙️ Configurações", width="stretch"):
             st.session_state["pagina"] = "configuracoes"
-            st.rerun()
-
-        st.divider()
-        if st.button("Sair", width="stretch", type="primary"):
-            st.session_state.pop("auth_token", None)
             st.rerun()
 
     jogo_selecionado = st.session_state.get("jogo_selecionado")
@@ -698,12 +798,12 @@ def _render_authenticated(
             with coluna_atual:
                 with st.container(border=True):
                     # Exibe a imagem de capa
-                    if jogo.get("background_image"):
-                        st.image(
-                            jogo["background_image"],
-                            alt=f"Capa de {jogo.get('name', 'jogo')}",
-                            width="stretch",
-                        )
+                    cover_url = _url_capa_jogo(jogo)
+                    st.image(
+                        cover_url,
+                        alt=f"Capa de {jogo.get('name', 'jogo')}",
+                        width="stretch",
+                    )
 
                     nome = jogo.get("name", "Desconhecido")
                     st.subheader(nome)
@@ -773,6 +873,11 @@ def main() -> None:
         return
 
     token = st.session_state.get("auth_token")
+    previous_token = st.session_state.get("_last_auth_token")
+    if token != previous_token:
+        _clear_cached_rawg_data()
+        st.session_state["_last_auth_token"] = token
+
     if isinstance(token, str) and token:
         rawg_key = secrets.get("RAWG_API_KEY") or os.environ.get("RAWG_API_KEY")
         _render_authenticated(api, token, rawg_key)

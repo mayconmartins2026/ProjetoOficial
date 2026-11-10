@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -21,6 +22,12 @@ class AuthAPIError(Exception):
 class AuthSession:
     token: str
     user_id: int | str
+
+
+@dataclass(frozen=True)
+class GameRatingAverage:
+    average: Decimal
+    total: int
 
 
 class AuthAPI:
@@ -95,6 +102,70 @@ class AuthAPI:
             failure_message="Não foi possível carregar os comentários deste jogo.",
         )
         return self._review_list(response)
+
+    def game_rating_averages(
+        self, token: str, game_names: list[str]
+    ) -> dict[str, GameRatingAverage]:
+        normalized_names = list(
+            dict.fromkeys(name.strip() for name in game_names if name.strip())
+        )
+        if not normalized_names:
+            return {}
+
+        response = self._request(
+            "POST",
+            "avaliacoes/medias",
+            payload={"nomes_jogo": normalized_names},
+            token=token,
+            failure_message="Não foi possível carregar as médias das avaliações.",
+        )
+        averages = response.get("medias")
+        if not isinstance(averages, list):
+            raise AuthAPIError(
+                "O serviço retornou uma lista de médias inválida.",
+                code="rating_averages_invalid",
+            )
+
+        result: dict[str, GameRatingAverage] = {}
+        for item in averages:
+            if not isinstance(item, dict):
+                raise AuthAPIError(
+                    "O serviço retornou uma média de jogo inválida.",
+                    code="rating_averages_invalid",
+                )
+            game_name = item.get("nome_jogo")
+            raw_average = item.get("media")
+            total = item.get("total")
+            if (
+                not isinstance(game_name, str)
+                or not game_name.strip()
+                or isinstance(raw_average, bool)
+                or not isinstance(raw_average, (int, float, str))
+                or isinstance(total, bool)
+                or not isinstance(total, int)
+                or total <= 0
+            ):
+                raise AuthAPIError(
+                    "O serviço retornou uma média de jogo inválida.",
+                    code="rating_averages_invalid",
+                )
+            try:
+                average = Decimal(str(raw_average))
+            except InvalidOperation as error:
+                raise AuthAPIError(
+                    "O serviço retornou uma média de jogo inválida.",
+                    code="rating_averages_invalid",
+                ) from error
+            if not average.is_finite() or not Decimal("1") <= average <= Decimal("5"):
+                raise AuthAPIError(
+                    "O serviço retornou uma média fora da escala de 1 a 5.",
+                    code="rating_averages_invalid",
+                )
+            result[game_name.strip().casefold()] = GameRatingAverage(
+                average=average,
+                total=total,
+            )
+        return result
 
     def my_reviews(self, token: str) -> list[dict[str, Any]]:
         response = self._request(
@@ -231,6 +302,12 @@ class AuthAPI:
                     "verifique se o endpoint usa a sessão autenticada).",
                     code="my_reviews_unavailable",
                 )
+            if path == "avaliacoes/medias":
+                raise AuthAPIError(
+                    f"{failure_message} (HTTP {response.status_code}; "
+                    "a API não autorizou a requisição).",
+                    code="rating_averages_unauthorized",
+                )
             if path == "auth/me":
                 raise AuthAPIError(
                     "Sua sessão expirou. Entre novamente.", code="unauthenticated"
@@ -247,7 +324,11 @@ class AuthAPI:
                 raise AuthAPIError(
                     "O endpoint de avaliações avalia_es não foi publicado no Xano."
                 )
-            if path in {"avaliacoes/by-game", "avaliacoes/minhas"} and response.status_code == 404:
+            if path in {
+                "avaliacoes/by-game",
+                "avaliacoes/minhas",
+                "avaliacoes/medias",
+            } and response.status_code == 404:
                 raise AuthAPIError(
                     f"O endpoint de avaliações ({path}) não foi publicado no Xano."
                 )
@@ -264,7 +345,11 @@ class AuthAPI:
                     "O Xano não aceitou o arquivo. Confira se o campo multipart "
                     "é img_perfil e se o endpoint recebe um arquivo."
                 )
-            if path in {"avaliacoes/by-game", "avaliacoes/minhas"}:
+            if path in {
+                "avaliacoes/by-game",
+                "avaliacoes/minhas",
+                "avaliacoes/medias",
+            }:
                 detail = self._error_message(response)
                 detail_suffix = f": {detail}" if detail else ""
                 raise AuthAPIError(

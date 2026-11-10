@@ -15,9 +15,9 @@ Armazena os dados das pessoas que utilizam a plataforma.
 *   **img_perfil** (image, opcional): Foto de perfil pública exibida junto às avaliações do utilizador.
 
 ### 1.2. Game (Jogos)
-Armazena a identificação dos jogos obtida pela API RAWG para relacioná-los com avaliações.
+Armazena a identificação dos jogos obtida pela API CheapShark para relacioná-los com avaliações.
 *   **id** (integer): ID interno no Xano.
-*   **external_api_id** (integer): O ID do jogo na API RAWG.
+*   **external_api_id** (integer): O ID numérico do jogo na API CheapShark.
 *   **title** (text): Nome do jogo.
 *   **cover_url** (text, opcional): Link para a imagem da capa.
 

@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import streamlit as st
 from streamlit.testing.v1 import AppTest
 
 
@@ -12,7 +13,7 @@ API_URL = "https://example.xano.io/api:ZnpRG7wg"
 APP_PATH = Path(__file__).resolve().parents[1] / "app.py"
 
 
-def response(status_code: int, payload: dict[str, object]) -> Mock:
+def response(status_code: int, payload: object) -> Mock:
     result = Mock()
     result.status_code = status_code
     result.ok = 200 <= status_code < 300
@@ -21,9 +22,9 @@ def response(status_code: int, payload: dict[str, object]) -> Mock:
 
 
 class AuthenticationAppTests(unittest.TestCase):
-    def run_app(self, app: AppTest) -> AppTest:
+    def run_app(self, app: AppTest, *, timeout: float = 10) -> AppTest:
         with patch.dict(os.environ, {"XANO_API_BASE_URL": API_URL}):
-            return app.run()
+            return app.run(timeout=timeout)
 
     def test_authentication_forms_are_available(self) -> None:
         app = self.run_app(AppTest.from_file(str(APP_PATH)))
@@ -89,7 +90,7 @@ class AuthenticationAppTests(unittest.TestCase):
         app = AppTest.from_file(str(APP_PATH))
         app.query_params["magic_token"] = "one-time-token"
         app.query_params["email"] = "user@example.com"
-        self.run_app(app)
+        self.run_app(app, timeout=10)
 
         self.assertEqual(dict(app.query_params), {})
         self.assertEqual([field.label for field in app.text_input], [
@@ -115,6 +116,7 @@ class AuthenticationAppTests(unittest.TestCase):
             response(200, {"id": 7, "name": "Jogador", "email": "user@example.com"}),
         ]
         app = self.run_app(AppTest.from_file(str(APP_PATH)))
+        app.session_state["pagina"] = "configuracoes"
         app.text_input[0].set_value("user@example.com")
         app.text_input[1].set_value("Password1")
         self.run_app(app.button[0].click())
@@ -149,18 +151,21 @@ class AuthenticationAppTests(unittest.TestCase):
         )
         app = AppTest.from_file(str(APP_PATH))
         app.session_state["auth_token"] = "session-token"
+        app.session_state["pagina"] = "configuracoes"
         self.run_app(app)
-        self.run_app(app.button[0].click())
+        logout_button = next(button for button in app.button if button.label == "Sair")
+        self.run_app(logout_button.click())
 
         self.assertNotIn("auth_token", app.session_state)
         self.assertEqual(app.exception, [])
 
     @patch("requests.Session.request")
-    def test_selected_game_shows_summary_and_review_form(
+    def test_selected_game_shows_review_form_without_external_description(
         self, request: Mock
     ) -> None:
         request.side_effect = [
             response(200, {"id": 7, "name": "Jogador", "email": "user@example.com"}),
+            response(200, {"medias": [{"nome_jogo": "God of War", "media": 4.5, "total": 2}]}),
             response(
                 200,
                 {
@@ -180,48 +185,15 @@ class AuthenticationAppTests(unittest.TestCase):
         app = AppTest.from_file(str(APP_PATH))
         app.session_state["auth_token"] = "session-token"
         app.session_state["jogo_selecionado"] = {
-            "id": 3498,
+            "id": "3498",
             "name": "God of War",
+            "background_image": "https://images.example/god-of-war.jpg",
         }
-        app_module = __import__("app")
-        app_module.buscar_detalhes_jogo_rawg.clear()
-        app_module._traduzir_para_portugues.clear()
-        with patch(
-            "requests.get",
-            side_effect=[
-                response(
-                    200,
-                    {
-                        "name": "God of War",
-                        "description_raw": (
-                            "Kratos begins a new journey. He travels with his son."
-                        ),
-                    },
-                ),
-                response(
-                    200,
-                    {
-                        "responseData": {
-                            "translatedText": (
-                                "Kratos inicia uma nova jornada. "
-                                "Ele viaja com seu filho."
-                            )
-                        }
-                    },
-                ),
-            ],
-        ):
-            with patch.dict(os.environ, {"RAWG_API_KEY": "test-key"}):
-                self.run_app(app)
+        self.run_app(app)
 
         self.assertEqual(app.exception, [])
-        self.assertIn("Sobre o jogo", [item.value for item in app.subheader])
-        self.assertTrue(
-            any(
-                "Kratos inicia uma nova jornada." in item.value
-                for item in app.markdown
-            )
-        )
+        self.assertFalse(any("Sobre o jogo" in item.value for item in app.subheader))
+        self.assertTrue(any("God of War" in item.value for item in app.title))
         self.assertEqual(app.text_area[0].label, "Comentário")
         self.assertTrue(any(button.label == "Enviar avaliação" for button in app.button))
         self.assertTrue(any("May" in item.value for item in app.markdown))
@@ -291,40 +263,38 @@ class AuthenticationAppTests(unittest.TestCase):
                         ]
                     },
                 )
+            if url.endswith("/avaliacoes/medias"):
+                return response(200, {"medias": []})
             self.fail(f"Unexpected API request: {method} {url}")
 
         request.side_effect = respond
         app = AppTest.from_file(str(APP_PATH))
         app.session_state["auth_token"] = "session-token"
         app_module = __import__("app")
-        app_module.buscar_jogos_rawg.clear()
-        app_module.buscar_capa_jogo_rawg.clear()
+        app_module.buscar_capa_jogo_cheapshark.clear()
 
         with patch(
             "requests.get",
-            side_effect=[
-                response(200, {"results": []}),
-                response(
-                    200,
+            return_value=response(
+                200,
+                [
                     {
-                        "results": [
-                            {
-                                "name": "God of War",
-                                "background_image": "https://images.example/god-of-war.jpg",
-                            }
-                        ]
-                    },
-                ),
-            ],
-        ) as rawg_request:
-            with patch.dict(os.environ, {"RAWG_API_KEY": "test-key"}):
-                self.run_app(app)
-                my_reviews_button = next(
-                    button
-                    for button in app.sidebar.button
-                    if button.label == "📝 Minhas Reviews"
-                )
-                self.run_app(my_reviews_button.click())
+                        "gameID": "236053",
+                        "external": "God of War",
+                        "thumb": "https://images.example/god-of-war.jpg",
+                        "cheapest": "24.99",
+                        "cheapestDealID": "deal-id",
+                    }
+                ],
+            ),
+        ) as cheapshark_request:
+            self.run_app(app)
+            my_reviews_button = next(
+                button
+                for button in app.sidebar.button
+                if button.label == "📝 Minhas Reviews"
+            )
+            self.run_app(my_reviews_button.click())
 
         self.assertEqual(app.exception, [])
         self.assertEqual(app.session_state["pagina"], "minhas_reviews")
@@ -349,7 +319,16 @@ class AuthenticationAppTests(unittest.TestCase):
             if call.args[1].endswith("/avaliacoes/minhas")
         )
         self.assertTrue(my_reviews_request.kwargs["headers"]["Authorization"])
-        self.assertEqual(rawg_request.call_count, 2)
+        game_requests = [
+            call
+            for call in cheapshark_request.call_args_list
+            if call.args[0].endswith("/games")
+        ]
+        self.assertEqual(len(game_requests), 1)
+        self.assertEqual(
+            game_requests[0].kwargs["params"],
+            {"title": "God of War"},
+        )
 
     @patch("requests.Session.request")
     def test_submitting_evaluation_uses_avaliacoes_table_endpoint(
@@ -363,6 +342,17 @@ class AuthenticationAppTests(unittest.TestCase):
                 return response(
                     200,
                     {"id": 7, "name": "Jogador", "email": "user@example.com"},
+                )
+            if url.endswith("/avaliacoes/medias"):
+                return response(
+                    200,
+                    {
+                        "medias": (
+                            [{"nome_jogo": "God of War", "media": 5, "total": 1}]
+                            if review_created
+                            else []
+                        )
+                    },
                 )
             if url.endswith("/avaliacoes/by-game"):
                 reviews = []
@@ -397,38 +387,17 @@ class AuthenticationAppTests(unittest.TestCase):
         app = AppTest.from_file(str(APP_PATH))
         app.session_state["auth_token"] = "session-token"
         app.session_state["jogo_selecionado"] = {
-            "id": 3498,
+            "id": "3498",
             "name": "God of War",
         }
-        app_module = __import__("app")
-        app_module.buscar_detalhes_jogo_rawg.clear()
-        app_module._traduzir_para_portugues.clear()
-        with patch(
-            "requests.get",
-            side_effect=[
-                response(
-                    200,
-                    {
-                        "description_raw": (
-                            "Kratos begins a new journey. He travels with his son."
-                        )
-                    },
-                ),
-                response(
-                    200,
-                    {"responseData": {"translatedText": "Kratos inicia uma jornada."}},
-                ),
-            ],
-        ):
-            with patch.dict(os.environ, {"RAWG_API_KEY": "test-key"}):
-                self.run_app(app)
-                app.text_area[0].set_value("Uma aventura marcante.")
-                submit_index = next(
-                    index
-                    for index, button in enumerate(app.button)
-                    if button.label == "Enviar avaliação"
-                )
-                self.run_app(app.button[submit_index].click())
+        self.run_app(app)
+        app.text_area[0].set_value("Uma aventura marcante.")
+        submit_index = next(
+            index
+            for index, button in enumerate(app.button)
+            if button.label == "Enviar avaliação"
+        )
+        self.run_app(app.button[submit_index].click())
 
         evaluation_request = next(
             call for call in request.call_args_list
@@ -452,6 +421,12 @@ class AuthenticationAppTests(unittest.TestCase):
         )
         self.assertTrue(
             any("Uma aventura marcante." in item.value for item in app.markdown)
+        )
+        self.assertTrue(
+            any(
+                "Média da comunidade: 5,0/5 · 1 avaliação(ões)" in item.value
+                for item in app.caption
+            )
         )
         self.assertEqual(app.exception, [])
 
@@ -481,23 +456,6 @@ class AuthenticationAppTests(unittest.TestCase):
             "Data não disponível",
         )
 
-    def test_rawg_platforms_are_rendered_with_icons_and_deduplicated(self) -> None:
-        app_module = __import__("app")
-
-        self.assertEqual(
-            app_module._game_platforms(
-                {
-                    "platforms": [
-                        {"platform": {"name": "PC"}},
-                        {"platform": {"name": "PlayStation 5"}},
-                        {"platform": {"name": "PC"}},
-                        {"platform": {"name": "Xbox Series X|S"}},
-                    ]
-                }
-            ),
-            "🖥️ PC · 🎮 PlayStation 5 · 🎮 Xbox Series X|S",
-        )
-
     @patch("requests.Session.request")
     def test_settings_shows_profile_photo_upload(self, request: Mock) -> None:
         request.return_value = response(
@@ -519,6 +477,481 @@ class AuthenticationAppTests(unittest.TestCase):
         self.assertEqual(app.file_uploader[0].label, "Escolha uma imagem")
         self.assertTrue(
             any(button.label == "Salvar foto de perfil" for button in app.button)
+        )
+
+    @patch("requests.Session.request")
+    @patch("requests.get")
+    def test_game_catalog_uses_cheapshark_and_converts_prices(
+        self, get: Mock, request: Mock
+    ) -> None:
+        def respond(method: str, url: str, **kwargs: object) -> Mock:
+            if url.endswith("/auth/me"):
+                return response(
+                    200,
+                    {"id": 7, "name": "Jogador", "email": "user@example.com"},
+                )
+            if url.endswith("/avaliacoes/medias"):
+                return response(
+                    200,
+                    {"medias": [{"nome_jogo": "Hades", "media": 4.5, "total": 10}]},
+                )
+            if url.endswith("/avaliacoes/by-game"):
+                return response(200, {"avaliacoes": []})
+            self.fail(f"Unexpected API request: {method} {url}")
+
+        request.side_effect = respond
+
+        def get_external(url: str, **kwargs: object) -> Mock:
+            if url.endswith("/deals"):
+                return response(200, [])
+            if url.endswith("/stores"):
+                return response(200, [])
+            if url == "https://api.frankfurter.app/latest":
+                return response(
+                    200,
+                    {"date": "2026-11-09", "rates": {"BRL": 5}},
+                )
+            if url.endswith("/games"):
+                return response(
+                    200,
+                    [
+                        {
+                            "gameID": "196149",
+                            "external": "Hades",
+                            "thumb": "https://images.example/hades.jpg",
+                            "cheapest": "24.99",
+                            "cheapestDealID": "deal-id",
+                        }
+                    ],
+                )
+            self.fail(f"Unexpected external API request: {url}")
+
+        get.side_effect = get_external
+        app = AppTest.from_file(str(APP_PATH))
+        app.session_state["auth_token"] = "session-token"
+        st.cache_data.clear()
+
+        self.run_app(app)
+        app.text_input[0].set_value("Hades")
+        self.run_app(app)
+
+        self.assertEqual(app.exception, [])
+        cheapest_price = next(
+            metric.value
+            for metric in app.metric
+            if metric.label == "Menor preço encontrado"
+        )
+        self.assertEqual(cheapest_price, "R$ 124,95")
+        evaluation_button = next(
+            button for button in app.button if button.label == "Fazer avaliação"
+        )
+        self.run_app(evaluation_button.click())
+
+        self.assertEqual(app.exception, [])
+        self.assertIn("Sua avaliação", [item.value for item in app.subheader])
+        self.assertTrue(
+            any(
+                "Média da comunidade: 4,5/5 · 10 avaliação(ões)" in item.value
+                for item in app.caption
+            )
+        )
+        self.assertEqual(app.text_area[0].label, "Comentário")
+        self.assertTrue(
+            any(
+                image.proto.imgs[0].url == "https://images.example/hades.jpg"
+                for image in app.image
+            )
+        )
+        xray_button = next(
+            button for button in app.button if button.label == "Não avaliado"
+        )
+        self.run_app(xray_button.click())
+
+        self.assertEqual(app.exception, [])
+        self.assertIn("Raio-X técnico", [item.value for item in app.title])
+        self.assertIn("Hades", [item.value for item in app.subheader])
+        self.assertEqual(
+            [item.value for item in app.caption if "Estado:" in item.value],
+            ["Estado: Sem dados ainda"] * 3,
+        )
+        self.assertTrue(
+            any(
+                "não significa que ele seja livre de DRM" in item.value
+                for item in app.warning
+            )
+        )
+        game_searches = [
+            call for call in get.call_args_list if call.args[0].endswith("/games")
+        ]
+        self.assertEqual(len(game_searches), 1)
+
+    @patch("requests.Session.request")
+    def test_xray_page_explains_missing_data_and_methodology(
+        self, request: Mock
+    ) -> None:
+        request.return_value = response(
+            200,
+            {"id": 7, "name": "Jogador", "email": "user@example.com"},
+        )
+        app = AppTest.from_file(str(APP_PATH))
+        app.session_state["auth_token"] = "session-token"
+        app.session_state["pagina"] = "raiox"
+
+        self.run_app(app)
+        app.text_input[0].set_value("Elden Ring")
+        self.run_app(
+            next(
+                button for button in app.button if button.label == "Ver Raio-X"
+            ).click()
+        )
+
+        self.assertEqual(app.exception, [])
+        self.assertIn("Elden Ring", [item.value for item in app.subheader])
+        self.assertEqual(
+            [item.value for item in app.caption if "Estado:" in item.value],
+            ["Estado: Sem dados ainda"] * 3,
+        )
+        self.assertTrue(
+            any("Versão/patch: Sem dados" in item.value for item in app.caption)
+        )
+        self.assertTrue(
+            any("em até 90 dias" in item.value for item in app.markdown)
+        )
+
+    @patch("requests.Session.request")
+    @patch("requests.get")
+    def test_promotions_page_shows_cheapshark_prices_in_reais(
+        self, get: Mock, request: Mock
+    ) -> None:
+        def api_response(method: str, url: str, **kwargs: object) -> Mock:
+            if url.endswith("/auth/me"):
+                return response(
+                    200,
+                    {
+                        "id": 7,
+                        "name": "Jogador",
+                        "email": "user@example.com",
+                    },
+                )
+            if url.endswith("/avaliacoes/medias"):
+                return response(
+                    200,
+                    {
+                        "medias": [
+                            {
+                                "nome_jogo": "Jogo em promoção",
+                                "media": 4.2,
+                                "total": 5,
+                            }
+                        ]
+                    },
+                )
+            self.fail(f"Unexpected API request: {method} {url}")
+
+        request.side_effect = api_response
+        deals_response = response(
+            200,
+            [
+                {
+                    "title": "Jogo em promoção",
+                    "dealID": "deal-id",
+                    "storeID": "1",
+                    "salePrice": "4.99",
+                    "normalPrice": "9.99",
+                    "savings": "50.050050",
+                    "isOnSale": "1",
+                    "thumb": "https://images.example/game.jpg",
+                }
+            ],
+        )
+        rate_response = response(
+            200,
+            {
+                "date": "2026-11-09",
+                "rates": {"BRL": 5},
+            },
+        )
+        def external_response(url: str, **kwargs: object) -> Mock:
+            if url.endswith("/deals"):
+                return deals_response
+            if url == "https://api.frankfurter.app/latest":
+                return rate_response
+            if url.endswith("/stores"):
+                return response(
+                    200,
+                    [{"storeID": "1", "storeName": "Steam", "isActive": 1}],
+                )
+            self.fail(f"Unexpected external API request: {url}")
+
+        get.side_effect = external_response
+        app = AppTest.from_file(str(APP_PATH))
+        app.session_state["auth_token"] = "session-token"
+        st.cache_data.clear()
+
+        self.run_app(app)
+        promotions_button = next(
+            button
+            for button in app.sidebar.button
+            if button.label == "🏷️ Promoções"
+        )
+        self.run_app(promotions_button.click())
+
+        self.assertEqual(app.exception, [])
+        self.assertEqual(app.session_state["pagina"], "promocoes")
+        self.assertIn("Jogos em promoção", [item.value for item in app.title])
+        self.assertTrue(
+            app.metric,
+            (
+                [item.value for item in app.error],
+                [item.value for item in app.warning],
+                [item.value for item in app.info],
+            ),
+        )
+        self.assertEqual(app.metric[0].value, "R$ 24,95")
+        self.assertTrue(
+            any(
+                "Média da comunidade: 4,2/5 · 5 avaliação(ões)" in item.value
+                for item in app.caption
+            )
+        )
+        self.assertTrue(
+            any("Preço normal: R$ 49,95" in item.value for item in app.caption)
+        )
+        self.assertTrue(
+            any(
+                ":material/computer: PC · :material/storefront: Steam" in item.value
+                for item in app.caption
+            ),
+            [item.value for item in app.caption],
+        )
+        self.assertTrue(
+            any(
+                image.proto.imgs[0].url == "https://images.example/game.jpg"
+                for image in app.image
+            )
+        )
+        deal_request = next(
+            call for call in get.call_args_list if call.args[0].endswith("/deals")
+        )
+        self.assertEqual(
+            deal_request.kwargs["params"],
+            {
+                "onSale": 1,
+                "pageSize": 60,
+                "sortBy": "Savings",
+                "desc": 1,
+            },
+        )
+        self.run_app(
+            next(button for button in app.button if button.label == "Não avaliado").click()
+        )
+
+        self.assertEqual(app.exception, [])
+        self.assertIn("Raio-X técnico", [item.value for item in app.title])
+        self.assertIn("Jogo em promoção", [item.value for item in app.subheader])
+        self.run_app(next(button for button in app.button if button.label == "Voltar").click())
+
+        self.assertEqual(app.exception, [])
+        self.assertEqual(app.session_state["pagina"], "promocoes")
+        app.slider[0].set_value(51)
+        self.run_app(app)
+
+        self.assertTrue(
+            any(
+                "Nenhuma oferta corresponde aos filtros selecionados."
+                in message.value
+                for message in app.info
+            )
+        )
+
+    @patch("requests.Session.request")
+    @patch("requests.get")
+    def test_homepage_shows_promotion_carousel_without_dashboard_metrics(
+        self, get: Mock, request: Mock
+    ) -> None:
+        def api_response(method: str, url: str, **kwargs: object) -> Mock:
+            if url.endswith("/auth/me"):
+                return response(
+                    200,
+                    {"id": 7, "name": "Jogador", "email": "user@example.com"},
+                )
+            if url.endswith("/avaliacoes/medias"):
+                return response(
+                    200,
+                    {
+                        "medias": [
+                            {"nome_jogo": "Jogo 0", "media": 4.5, "total": 10},
+                            {"nome_jogo": "Jogo 1", "media": 3.8, "total": 5},
+                        ]
+                    },
+                )
+            self.fail(f"Unexpected API request: {method} {url}")
+
+        request.side_effect = api_response
+        deals = [
+            {
+                "title": f"Jogo {index}",
+                "dealID": f"deal-{index}",
+                "storeID": "1",
+                "salePrice": "4.99",
+                "normalPrice": "9.99",
+                "savings": "50",
+                "isOnSale": "1",
+                "thumb": f"https://images.example/game-{index}.jpg",
+            }
+            for index in range(4)
+        ]
+
+        def external_response(url: str, **kwargs: object) -> Mock:
+            if url.endswith("/deals"):
+                return response(200, deals)
+            if url == "https://api.frankfurter.app/latest":
+                return response(
+                    200,
+                    {"date": "2026-11-09", "rates": {"BRL": 5}},
+                )
+            if url.endswith("/stores"):
+                return response(
+                    200,
+                    [{"storeID": "1", "storeName": "Steam", "isActive": 1}],
+                )
+            self.fail(f"Unexpected external API request: {url}")
+
+        get.side_effect = external_response
+        app = AppTest.from_file(str(APP_PATH))
+        app.session_state["auth_token"] = "session-token"
+        st.cache_data.clear()
+
+        self.run_app(app, timeout=10)
+
+        self.assertEqual(app.exception, [])
+        self.assertFalse(
+            any(
+                metric.label
+                in {"Jogos Registrados", "Suas Avaliações", "Jogadores Ativos"}
+                for metric in app.metric
+            )
+        )
+        self.assertIn("Ofertas em destaque", [item.value for item in app.subheader])
+        self.assertTrue(
+            any(
+                ":material/computer: PC · :material/storefront: Steam" in item.value
+                for item in app.caption
+            ),
+            [item.value for item in app.caption],
+        )
+        self.assertEqual(app.metric[0].delta, "-50.1%")
+        self.assertTrue(
+            any(
+                "Média da comunidade: 4,5/5 · 10 avaliação(ões)" in item.value
+                for item in app.caption
+            )
+        )
+        self.assertEqual(
+            [item.value for item in app.subheader if item.value.startswith("Jogo ")],
+            ["Jogo 0", "Jogo 1"],
+        )
+        next_button = next(
+            button for button in app.button if button.label == "Próximas"
+        )
+        self.run_app(next_button.click(), timeout=10)
+
+        self.assertEqual(app.exception, [])
+        self.assertEqual(app.session_state["home_promotions_page"], 1)
+        self.assertTrue(
+            any(item.value == "Jogo 2" for item in app.subheader)
+        )
+        self.assertTrue(
+            any(item.value == "Jogo 3" for item in app.subheader)
+        )
+
+    @patch("requests.Session.request")
+    @patch("requests.get")
+    def test_homepage_offers_games_to_review_without_search(
+        self, get: Mock, request: Mock
+    ) -> None:
+        def respond(method: str, url: str, **kwargs: object) -> Mock:
+            if url.endswith("/auth/me"):
+                return response(
+                    200,
+                    {"id": 7, "name": "Jogador", "email": "user@example.com"},
+                )
+            if url.endswith("/avaliacoes/medias"):
+                return response(
+                    200,
+                    {"medias": [{"nome_jogo": "Hades", "media": 4.2, "total": 5}]},
+                )
+            if url.endswith("/avaliacoes/by-game"):
+                return response(200, {"avaliacoes": []})
+            self.fail(f"Unexpected API request: {method} {url}")
+
+        request.side_effect = respond
+
+        def external_response(url: str, **kwargs: object) -> Mock:
+            if url.endswith("/deals"):
+                return response(
+                    200,
+                    [
+                        {
+                            "title": "Hades",
+                            "dealID": "hades-deal",
+                            "storeID": "1",
+                            "salePrice": "4.99",
+                            "normalPrice": "9.99",
+                            "savings": "50",
+                            "isOnSale": "1",
+                            "thumb": "https://images.example/hades.jpg",
+                        }
+                    ],
+                )
+            if url == "https://api.frankfurter.app/latest":
+                return response(
+                    200,
+                    {"date": "2026-11-09", "rates": {"BRL": 5}},
+                )
+            if url.endswith("/stores"):
+                return response(
+                    200,
+                    [{"storeID": "1", "storeName": "Steam", "isActive": 1}],
+                )
+            self.fail(f"Unexpected external API request: {url}")
+
+        get.side_effect = external_response
+        app = AppTest.from_file(str(APP_PATH))
+        app.session_state["auth_token"] = "session-token"
+        st.cache_data.clear()
+
+        self.run_app(app)
+
+        self.assertEqual(app.exception, [])
+        self.assertEqual(app.text_input[0].value, "")
+        self.assertIn(
+            "Jogos em destaque para avaliar",
+            [item.value for item in app.subheader],
+        )
+        self.assertIn("**Hades**", [item.value for item in app.markdown])
+        self.assertTrue(
+            any(":material/computer: PC" in item.value for item in app.caption)
+        )
+        self.assertTrue(
+            any(
+                "Média da comunidade: 4,2/5 · 5 avaliação(ões)" in item.value
+                for item in app.caption
+            )
+        )
+        evaluation_button = next(
+            button for button in app.button if button.label == "Fazer avaliação"
+        )
+        self.run_app(evaluation_button.click())
+
+        self.assertEqual(app.exception, [])
+        self.assertIn("Hades", [item.value for item in app.title])
+        self.assertTrue(
+            any(
+                call.args[1].endswith("/avaliacoes/by-game")
+                for call in request.call_args_list
+                if len(call.args) > 1
+            )
         )
 
 

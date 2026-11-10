@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from decimal import Decimal
 from unittest.mock import Mock
 
 import requests
@@ -144,6 +145,54 @@ class AuthClientTests(unittest.TestCase):
 
         self.assertIn("HTTP 400", raised.exception.message)
         self.assertIn("nome_jogo", raised.exception.message)
+
+    def test_game_rating_averages_batches_game_names_and_normalizes_results(
+        self,
+    ) -> None:
+        self.session.request.return_value = self.response(
+            200,
+            {
+                "medias": [
+                    {"nome_jogo": "Hades", "media": 4.5, "total": 12},
+                ]
+            },
+        )
+
+        result = self.api.game_rating_averages(
+            "secret-token",
+            [" Hades ", "Hades", "Stardew Valley"],
+        )
+
+        request = self.session.request.call_args
+        self.assertEqual(
+            request.args[:2],
+            (
+                "POST",
+                "https://example.xano.io/api:ZnpRG7wg/avaliacoes/medias",
+            ),
+        )
+        self.assertEqual(
+            request.kwargs["json"],
+            {"nomes_jogo": ["Hades", "Stardew Valley"]},
+        )
+        self.assertTrue(request.kwargs["headers"]["Authorization"])
+        self.assertEqual(result["hades"].average, Decimal("4.5"))
+        self.assertEqual(result["hades"].total, 12)
+
+    def test_game_rating_averages_empty_input_does_not_call_api(self) -> None:
+        self.assertEqual(self.api.game_rating_averages("secret-token", ["  "]), {})
+        self.session.request.assert_not_called()
+
+    def test_game_rating_averages_rejects_invalid_average(self) -> None:
+        self.session.request.return_value = self.response(
+            200,
+            {"medias": [{"nome_jogo": "Hades", "media": 6, "total": 2}]},
+        )
+
+        with self.assertRaises(AuthAPIError) as raised:
+            self.api.game_rating_averages("secret-token", ["Hades"])
+
+        self.assertEqual(raised.exception.code, "rating_averages_invalid")
 
     def test_my_reviews_uses_authenticated_endpoint(self) -> None:
         self.session.request.return_value = self.response(

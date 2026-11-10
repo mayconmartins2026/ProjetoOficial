@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import base64
-import os
 import re
 from datetime import date, datetime, timezone
-from html import unescape
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -15,10 +14,18 @@ from streamlit.errors import StreamlitSecretNotFoundError
 from ggreviews.auth_client import (
     AuthAPI,
     AuthAPIError,
+    GameRatingAverage,
     email_validation_error,
     password_policy_error,
 )
 from ggreviews.config import ConfigurationError, load_auth_config
+from ggreviews.cheapshark_client import (
+    fetch_promotions,
+    fetch_store_names,
+    fetch_usd_to_brl_rate,
+    promotion_url,
+    search_games,
+)
 
 
 def _capture_password_reset_link() -> None:
@@ -172,113 +179,6 @@ def _render_auth_forms(api: AuthAPI) -> None:
         _render_recovery(api)
 
 
-@st.cache_data(ttl=3600)
-def buscar_jogos_rawg(api_key: str, termo_busca: str = "") -> list:
-    """Busca jogos na API do RAWG, com suporte a pesquisa."""
-    url = f"https://api.rawg.io/api/games?key={api_key}&page_size=10"
-
-    if termo_busca:
-        url += f"&search={termo_busca}"
-    else:
-        # Se não tiver busca, traz os populares/recentes
-        url += "&ordering=-added"
-
-    try:
-        resposta = requests.get(url, timeout=10)
-        if resposta.status_code == 200:
-            dados = resposta.json()
-            return dados.get("results", [])
-    except Exception as e:
-        st.error(f"Erro ao conectar com a API: {e}")
-
-    return []
-
-
-@st.cache_data(ttl=3600)
-def buscar_detalhes_jogo_rawg(api_key: str, game_id: int) -> dict[str, Any]:
-    resposta = requests.get(
-        f"https://api.rawg.io/api/games/{game_id}",
-        params={"key": api_key},
-        timeout=10,
-    )
-    resposta.raise_for_status()
-    dados = resposta.json()
-    if not isinstance(dados, dict):
-        raise ValueError("A API RAWG retornou detalhes inválidos.")
-    return dados
-
-
-@st.cache_data(ttl=3600, max_entries=256)
-def buscar_capa_jogo_rawg(api_key: str, nome_jogo: str) -> str | None:
-    resposta = requests.get(
-        "https://api.rawg.io/api/games",
-        params={"key": api_key, "search": nome_jogo, "page_size": 10},
-        timeout=10,
-    )
-    resposta.raise_for_status()
-    dados = resposta.json()
-    resultados = dados.get("results") if isinstance(dados, dict) else None
-    if not isinstance(resultados, list):
-        raise ValueError("A API RAWG retornou uma lista de jogos inválida.")
-
-    nome_normalizado = nome_jogo.strip().casefold()
-    jogos = [jogo for jogo in resultados if isinstance(jogo, dict)]
-    jogo = next(
-        (
-            item
-            for item in jogos
-            if isinstance(item.get("name"), str)
-            and item["name"].strip().casefold() == nome_normalizado
-            and isinstance(item.get("background_image"), str)
-        ),
-        None,
-    )
-    if jogo is None:
-        jogo = next(
-            (
-                item
-                for item in jogos
-                if isinstance(item.get("background_image"), str)
-            ),
-            None,
-        )
-    capa = jogo.get("background_image") if jogo else None
-    return capa if isinstance(capa, str) and capa else None
-
-
-def _resumo_texto(descricao: str) -> str:
-    texto = unescape(re.sub(r"<[^>]*>", " ", descricao))
-    texto = re.sub(r"\s+", " ", texto).strip()
-    frases = re.split(r"(?<=[.!?])\s+", texto)
-    resumo = " ".join(frases[:2]).strip()
-    if len(resumo) > 500:
-        resumo = resumo[:497].rsplit(" ", 1)[0] + "..."
-    return resumo
-
-
-@st.cache_data(ttl=86400, max_entries=256)
-def _traduzir_para_portugues(texto: str) -> str:
-    resposta = requests.get(
-        "https://api.mymemory.translated.net/get",
-        params={
-            "q": texto,
-            "langpair": "autodetect|pt-BR",
-        },
-        timeout=10,
-    )
-    resposta.raise_for_status()
-    dados = resposta.json()
-    response_data = dados.get("responseData") if isinstance(dados, dict) else None
-    traducao = (
-        response_data.get("translatedText")
-        if isinstance(response_data, dict)
-        else None
-    )
-    if not isinstance(traducao, str) or not traducao.strip():
-        raise ValueError("O serviço de tradução não retornou um resumo.")
-    return unescape(traducao).strip()
-
-
 def _placeholder_data_uri(label: str, *, kind: str) -> str:
     safe_label = re.sub(r"[^A-Za-z0-9 ]+", "", label or kind).strip() or kind.title()
     initials = safe_label[:2].upper()
@@ -328,7 +228,7 @@ def _url_imagem_perfil(valor: Any, api: AuthAPI) -> str | None:
 
 
 def _url_capa_jogo(game: dict[str, Any]) -> str:
-    cover_url = game.get("background_image")
+    cover_url = game.get("background_image") or game.get("thumb")
     if isinstance(cover_url, str) and cover_url:
         return cover_url
     return _placeholder_data_uri(game.get("name") or "Jogo", kind="game")
@@ -392,43 +292,6 @@ def _render_review_date(review: dict[str, Any]) -> None:
         st.caption(_format_review_date(_review_date_value(review)))
 
 
-def _game_platforms(game: dict[str, Any]) -> str:
-    platforms = game.get("platforms")
-    if not isinstance(platforms, list):
-        return ""
-
-    icons = (
-        ("pc", "🖥️"),
-        ("windows", "🖥️"),
-        ("xbox", "🎮"),
-        ("playstation", "🎮"),
-        ("nintendo", "🎮"),
-        ("mac", "🍎"),
-        ("linux", "🐧"),
-        ("ios", "📱"),
-        ("android", "📱"),
-        ("web", "🌐"),
-    )
-    names: list[str] = []
-    seen: set[str] = set()
-    for entry in platforms:
-        platform = entry.get("platform") if isinstance(entry, dict) else None
-        name = platform.get("name") if isinstance(platform, dict) else None
-        if not isinstance(name, str) or not name.strip():
-            continue
-        name = name.strip()
-        normalized_name = name.casefold()
-        if normalized_name in seen:
-            continue
-        seen.add(normalized_name)
-        icon = next(
-            (symbol for fragment, symbol in icons if fragment in normalized_name),
-            "🎮",
-        )
-        names.append(f"{icon} {name}")
-    return " · ".join(names)
-
-
 def _apply_gamer_background() -> None:
     st.markdown(
         """
@@ -481,7 +344,7 @@ def _apply_gamer_background() -> None:
 
 
 def _render_game_review(
-    api: AuthAPI, token: str, rawg_key: str | None, game: dict[str, Any]
+    api: AuthAPI, token: str, game: dict[str, Any]
 ) -> None:
     game_name = str(game.get("name") or "Jogo")
     game_id = game.get("id")
@@ -491,34 +354,36 @@ def _render_game_review(
         st.rerun()
 
     st.title(game_name)
+    ratings = _load_game_rating_averages(api, token, [game_name])
+    _render_game_rating(game_name, ratings)
+    _render_xray_badge(
+        game_name,
+        key=f"review_xray_{game.get('id', game_name)}",
+        origin="review",
+    )
     cover_url = _url_capa_jogo(game)
     st.image(cover_url, alt=f"Capa de {game_name}", width="stretch")
 
-    if not rawg_key:
-        st.error("Configure RAWG_API_KEY para carregar o resumo do jogo.")
-        return
-    if not isinstance(game_id, int):
-        st.error("Não foi possível identificar este jogo.")
-        return
-
-    try:
-        details = buscar_detalhes_jogo_rawg(rawg_key, game_id)
-    except (requests.RequestException, ValueError):
-        st.error(
-            "Não foi possível carregar os detalhes do jogo. "
-            "Verifique a conexão e a chave da API RAWG."
-        )
-        return
-
-    resumo = details.get("description_raw") or details.get("description") or ""
-    if isinstance(resumo, str) and _resumo_texto(resumo):
-        st.subheader("Sobre o jogo")
+    cheapest = game.get("cheapest")
+    if isinstance(cheapest, Decimal):
         try:
-            st.write(_traduzir_para_portugues(_resumo_texto(resumo)))
+            rate, rate_date = buscar_cotacao_usd_brl()
+            st.metric(
+                "Menor preço encontrado",
+                _format_brl_price(cheapest, rate),
+            )
+            st.caption(
+                f"Cotação de referência: US$ 1 = {_format_brl_price(Decimal('1'), rate)} "
+                f"({rate_date:%d/%m/%Y}). Valor aproximado."
+            )
         except (requests.RequestException, ValueError):
-            st.error("Não foi possível traduzir o resumo do jogo para português.")
-    else:
-        st.info("A API RAWG não disponibilizou um resumo para este jogo.")
+            st.error("Não foi possível converter o preço para reais.")
+        cheapest_deal_id = game.get("cheapest_deal_id")
+        if isinstance(cheapest_deal_id, str) and cheapest_deal_id:
+            st.link_button(
+                "Ver menor oferta",
+                promotion_url(cheapest_deal_id),
+            )
 
     st.divider()
     st.subheader("Sua avaliação")
@@ -640,20 +505,464 @@ def _render_profile_settings(
     st.rerun()
 
 
-def _clear_cached_rawg_data() -> None:
-    for func in (
-        buscar_jogos_rawg,
-        buscar_detalhes_jogo_rawg,
-        buscar_capa_jogo_rawg,
-        _traduzir_para_portugues,
+@st.cache_data(ttl=900, max_entries=1)
+def buscar_ofertas_cheapshark() -> list[dict[str, Any]]:
+    return fetch_promotions()
+
+
+@st.cache_data(ttl=86400, max_entries=1)
+def buscar_lojas_cheapshark() -> dict[str, str]:
+    return fetch_store_names()
+
+
+@st.cache_data(ttl=3600, max_entries=1)
+def buscar_cotacao_usd_brl() -> tuple[Decimal, date]:
+    return fetch_usd_to_brl_rate()
+
+
+@st.cache_data(ttl=3600, max_entries=128)
+def buscar_jogos_cheapshark(termo_busca: str) -> list[dict[str, Any]]:
+    return search_games(termo_busca)
+
+
+@st.cache_data(ttl=3600, max_entries=256)
+def buscar_capa_jogo_cheapshark(nome_jogo: str) -> str | None:
+    jogos = search_games(nome_jogo)
+    nome_normalizado = nome_jogo.strip().casefold()
+    jogo = next(
+        (item for item in jogos if item["name"].casefold() == nome_normalizado),
+        jogos[0] if jogos else None,
+    )
+    cover = jogo.get("background_image") if jogo else None
+    return cover if isinstance(cover, str) else None
+
+
+def _format_brl_price(price_usd: Decimal, rate: Decimal) -> str:
+    price_brl = (price_usd * rate).quantize(
+        Decimal("0.01"),
+        rounding=ROUND_HALF_UP,
+    )
+    whole_reais, cents = f"{price_brl:.2f}".split(".")
+    formatted_reais = f"{int(whole_reais):,}".replace(",", ".")
+    return f"R$ {formatted_reais},{cents}"
+
+
+def _render_exchange_rate(rate: Decimal, rate_date: date) -> None:
+    st.caption(
+        f"Cotação de referência: US$ 1 = {_format_brl_price(Decimal('1'), rate)} "
+        f"({rate_date:%d/%m/%Y}). Os valores são aproximados; "
+        "o preço final pode variar na loja."
+    )
+
+
+def _open_xray(game_title: str, *, origin: str) -> None:
+    st.session_state["raiox_jogo"] = game_title.strip()
+    st.session_state["raiox_origem"] = origin
+    st.session_state["pagina"] = "raiox"
+    st.rerun()
+
+
+def _render_xray_badge(
+    game_title: str,
+    *,
+    key: str,
+    origin: str,
+) -> None:
+    if st.button(
+        "Não avaliado",
+        key=key,
+        type="tertiary",
+        icon=":material/info:",
+        help=(
+            "Raio-X técnico sem dados cadastrados. Isso não significa que o jogo "
+            "seja livre de DRM, launcher ou problemas de stuttering. Clique para "
+            "ver os critérios e a metodologia."
+        ),
     ):
-        clear = getattr(func, "clear", None)
-        if callable(clear):
-            clear()
+        _open_xray(game_title, origin=origin)
+
+
+def _load_game_rating_averages(
+    api: AuthAPI,
+    token: str,
+    game_names: list[str],
+) -> dict[str, GameRatingAverage] | None:
+    if not game_names:
+        return {}
+    try:
+        return api.game_rating_averages(token, game_names)
+    except AuthAPIError as error:
+        st.warning(
+            "As médias da comunidade estão indisponíveis no momento. "
+            f"{error.message}"
+        )
+        return None
+
+
+def _render_game_rating(
+    game_name: str,
+    averages: dict[str, GameRatingAverage] | None,
+) -> None:
+    if averages is None:
+        st.caption("Média da comunidade indisponível.")
+        return
+    rating = averages.get(game_name.strip().casefold())
+    if rating is None:
+        st.caption("Ainda sem avaliações da comunidade.")
+        return
+
+    formatted_average = f"{rating.average:.1f}".replace(".", ",")
+    st.caption(
+        f"⭐ Média da comunidade: {formatted_average}/5 · "
+        f"{rating.total} avaliação(ões)"
+    )
+
+
+def _render_xray_details(game_title: str) -> None:
+    st.subheader(game_title)
+    st.warning(
+        "Ainda não há uma avaliação técnica cadastrada para este jogo. "
+        "A ausência de alertas não significa que ele seja livre de DRM, launcher "
+        "secundário ou stuttering."
+    )
+    st.caption("Selo geral: Não avaliado · Confiança: Sem dados ainda")
+    st.caption("Última verificação: Ainda não verificado; nenhuma data registrada.")
+    st.caption("Versão/patch: Sem dados · Fonte geral: Nenhuma evidência cadastrada.")
+
+    criteria = [
+        {
+            "title": "Conta de terceiros / launcher secundário",
+            "states": "Não exige · Exige login opcional · Exige conta/launcher",
+            "description": (
+                "Verifica se é necessário criar uma conta externa ou instalar um "
+                "launcher além da loja onde o jogo foi comprado."
+            ),
+            "extra": "Launcher exigido: Sem dados.",
+        },
+        {
+            "title": "DRM / Sempre online",
+            "states": "Funciona offline · Exige verificação periódica · Sempre online",
+            "description": (
+                "Verifica o funcionamento sem internet, inclusive em campanhas "
+                "single-player, e se há checagens periódicas de licença."
+            ),
+            "extra": "Tipo de DRM: Sem dados.",
+        },
+        {
+            "title": "Compilação de shaders / stuttering",
+            "states": "Pré-compila no início · Engasgos leves · Engasgos frequentes",
+            "description": (
+                "Observa travamentos durante aproximadamente os primeiros "
+                "30 minutos de jogo no PC."
+            ),
+            "extra": (
+                "Método, fonte dos relatos e observações de hardware: Sem dados."
+            ),
+        },
+    ]
+
+    for criterion in criteria:
+        with st.container(border=True):
+            st.markdown(f"**{criterion['title']}**")
+            st.caption("Estado: Sem dados ainda")
+            st.write(criterion["description"])
+            st.caption(f"Estados possíveis: {criterion['states']}")
+            st.caption(criterion["extra"])
+            st.caption(
+                "Confiança: Sem dados ainda · Última verificação: Ainda não verificado."
+            )
+            st.caption(
+                "Evidência/fonte deste critério: Nenhuma cadastrada."
+            )
+
+    with st.container(border=True):
+        st.markdown("**Como interpretar o Raio-X**")
+        st.write(
+            "“Verificado pelo GGReviews” deve significar teste próprio com "
+            "configuração e versão registradas. “Baseado em relatos da comunidade” "
+            "deve incluir fontes públicas consultáveis. Sem evidências, o estado "
+            "correto é sempre “Sem dados ainda”; não inferimos ausência de "
+            "problemas."
+        )
+        st.write(
+            "Uma avaliação deve ser revista após patches que alterem DRM, "
+            "autenticação ou compilação de shaders, e em até 90 dias. Dados "
+            "desatualizados devem ser sinalizados antes de qualquer selo voltar "
+            "a ser exibido."
+        )
+
+
+def _render_xray_page() -> None:
+    st.title("Raio-X técnico")
+    game_title = st.session_state.get("raiox_jogo")
+    if not isinstance(game_title, str) or not game_title.strip():
+        with st.form("raiox_game_select"):
+            requested_title = st.text_input(
+                "Jogo para consultar",
+                placeholder="Ex.: Hades, Elden Ring...",
+            )
+            submitted = st.form_submit_button("Ver Raio-X")
+        if submitted and requested_title.strip():
+            st.session_state["raiox_jogo"] = requested_title.strip()
+            st.session_state["raiox_origem"] = "inicio"
+            st.rerun()
+        st.info("Selecione “Não avaliado” em um card ou informe o nome do jogo.")
+        return
+
+    _render_xray_details(game_title)
+    origin = st.session_state.get("raiox_origem", "inicio")
+    if st.button("Voltar", key="raiox_voltar"):
+        st.session_state.pop("raiox_jogo", None)
+        st.session_state["pagina"] = "inicio" if origin == "review" else origin
+        st.rerun()
+
+
+def _render_promotion_card(
+    deal: dict[str, Any],
+    rate: Decimal,
+    stores: dict[str, str],
+    rating_averages: dict[str, GameRatingAverage] | None,
+    *,
+    key_prefix: str,
+) -> None:
+    with st.container(border=True, height="stretch"):
+        image_url = deal.get("thumb")
+        if isinstance(image_url, str) and image_url.startswith("https://"):
+            st.image(
+                image_url,
+                alt=f"Capa de {deal['title']}",
+                width="stretch",
+            )
+        st.subheader(deal["title"])
+        store_name = stores.get(deal["store_id"], "Loja não identificada")
+        st.caption(f":material/computer: PC · :material/storefront: {store_name}")
+        _render_xray_badge(
+            deal["title"],
+            key=f"{key_prefix}_xray_{deal['deal_id']}",
+            origin="promocoes" if key_prefix == "promotions" else "inicio",
+        )
+        _render_game_rating(deal["title"], rating_averages)
+        st.metric(
+            label="Preço promocional",
+            value=_format_brl_price(deal["sale_price"], rate),
+            delta=f"-{deal['savings']:.1f}%",
+        )
+        st.caption(f"Preço normal: {_format_brl_price(deal['normal_price'], rate)}")
+        st.link_button(
+            "Ver oferta",
+            promotion_url(deal["deal_id"]),
+            key=f"{key_prefix}_deal_{deal['deal_id']}",
+            width="stretch",
+        )
+
+
+def _render_promotion_carousel(
+    promotions: list[dict[str, Any]],
+    rate: Decimal,
+    stores: dict[str, str],
+    rating_averages: dict[str, GameRatingAverage] | None,
+) -> None:
+    st.subheader("Ofertas em destaque")
+    if not promotions:
+        st.info("Nenhuma oferta em destaque no momento.")
+        return
+
+    page_size = 2
+    page_count = (len(promotions) + page_size - 1) // page_size
+    page_index = min(
+        st.session_state.get("home_promotions_page", 0),
+        page_count - 1,
+    )
+    start = page_index * page_size
+    visible_promotions = promotions[start : start + page_size]
+
+    previous_col, page_col, next_col = st.columns([1, 4, 1])
+    with previous_col:
+        if st.button(
+            "Anterior",
+            key="home_promotions_previous",
+            disabled=page_index == 0,
+            icon=":material/chevron_left:",
+        ):
+            st.session_state["home_promotions_page"] = page_index - 1
+            st.rerun()
+    with page_col:
+        st.caption(
+            f"Ofertas {start + 1}–{start + len(visible_promotions)} "
+            f"de {len(promotions)}"
+        )
+    with next_col:
+        if st.button(
+            "Próximas",
+            key="home_promotions_next",
+            disabled=page_index >= page_count - 1,
+            icon=":material/chevron_right:",
+        ):
+            st.session_state["home_promotions_page"] = page_index + 1
+            st.rerun()
+
+    columns = st.columns(page_size)
+    for index, deal in enumerate(visible_promotions):
+        with columns[index]:
+            _render_promotion_card(
+                deal,
+                rate,
+                stores,
+                rating_averages,
+                key_prefix="home",
+            )
+
+
+def _render_promotions(api: AuthAPI, token: str) -> None:
+    st.title("Jogos em promoção")
+    st.write(
+        "Confira ofertas disponíveis em diversas lojas. Os preços em dólar são "
+        "convertidos para reais pela cotação de referência mais recente."
+    )
+
+    search_term = st.text_input(
+        "Buscar jogo em promoção",
+        placeholder="Ex.: Hades, Stardew Valley...",
+        key="promocoes_pesquisa",
+    )
+    minimum_discount = st.slider(
+        "Desconto mínimo",
+        min_value=0,
+        max_value=100,
+        value=0,
+        format="%d%%",
+        key="promocoes_desconto_minimo",
+    )
+
+    try:
+        with st.spinner("Carregando ofertas da CheapShark..."):
+            promotions = buscar_ofertas_cheapshark()
+            rate, rate_date = buscar_cotacao_usd_brl()
+            try:
+                stores = buscar_lojas_cheapshark()
+            except (requests.RequestException, ValueError):
+                st.warning("Não foi possível carregar os nomes das lojas.")
+                stores = {}
+    except (requests.RequestException, ValueError):
+        st.error("Não foi possível carregar as ofertas. Tente novamente mais tarde.")
+        return
+
+    _render_exchange_rate(rate, rate_date)
+    normalized_search = search_term.strip().casefold()
+    filtered_promotions = [
+        deal
+        for deal in promotions
+        if deal["savings"] >= minimum_discount
+        and normalized_search in deal["title"].casefold()
+    ]
+    filtered_promotions.sort(
+        key=lambda deal: deal["savings"],
+        reverse=True,
+    )
+
+    if not filtered_promotions:
+        st.info("Nenhuma oferta corresponde aos filtros selecionados.")
+        return
+
+    rating_averages = _load_game_rating_averages(
+        api,
+        token,
+        [deal["title"] for deal in filtered_promotions],
+    )
+    st.caption(f"{len(filtered_promotions)} oferta(s) encontrada(s)")
+    columns = st.columns(2)
+    for index, deal in enumerate(filtered_promotions):
+        with columns[index % len(columns)]:
+            _render_promotion_card(
+                deal,
+                rate,
+                stores,
+                rating_averages,
+                key_prefix="promotions",
+            )
+
+
+def _featured_games_from_promotions(
+    promotions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    featured_games: list[dict[str, Any]] = []
+    seen_titles: set[str] = set()
+    for deal in sorted(
+        promotions,
+        key=lambda item: item["savings"],
+        reverse=True,
+    ):
+        title = deal["title"].strip()
+        normalized_title = title.casefold()
+        if normalized_title in seen_titles:
+            continue
+        seen_titles.add(normalized_title)
+        featured_games.append(
+            {
+                "id": f"featured-{deal['deal_id']}",
+                "name": title,
+                "background_image": deal.get("thumb"),
+                "cheapest": deal["sale_price"],
+                "cheapest_deal_id": deal["deal_id"],
+            }
+        )
+        if len(featured_games) == 6:
+            break
+    return featured_games
+
+
+def _render_featured_games(
+    games: list[dict[str, Any]],
+    rate: Decimal | None,
+    rating_averages: dict[str, GameRatingAverage] | None,
+) -> None:
+    st.subheader("Jogos em destaque para avaliar")
+    if not games:
+        st.info("Nenhum jogo em destaque disponível no momento.")
+        return
+
+    columns = st.columns(2)
+    for index, game in enumerate(games):
+        with columns[index % len(columns)]:
+            with st.container(border=True, height="stretch"):
+                st.image(
+                    _url_capa_jogo(game),
+                    alt=f"Capa de {game['name']}",
+                    width="stretch",
+                )
+                st.markdown(f"**{game['name']}**")
+                st.caption(":material/computer: PC")
+                _render_xray_badge(
+                    game["name"],
+                    key=f"featured_xray_{game['id']}",
+                    origin="inicio",
+                )
+                _render_game_rating(game["name"], rating_averages)
+                cheapest = game.get("cheapest")
+                if isinstance(cheapest, Decimal) and rate is not None:
+                    st.metric(
+                        "Menor preço encontrado",
+                        _format_brl_price(cheapest, rate),
+                    )
+
+                deal_id = game.get("cheapest_deal_id")
+                if isinstance(deal_id, str) and deal_id:
+                    st.link_button(
+                        "Ver menor oferta",
+                        promotion_url(deal_id),
+                        width="stretch",
+                    )
+                if st.button(
+                    "Fazer avaliação",
+                    key=f"btn_avaliar_{game['id']}",
+                    width="stretch",
+                ):
+                    st.session_state["jogo_selecionado"] = game
+                    st.rerun()
 
 
 def _render_my_reviews(
-    api: AuthAPI, token: str, rawg_key: str | None
+    api: AuthAPI, token: str
 ) -> None:
     st.title("Minhas Reviews")
     if st.button("Voltar ao início", key="voltar_minhas_reviews"):
@@ -675,12 +984,11 @@ def _render_my_reviews(
         if not isinstance(game_name, str) or not game_name.strip():
             continue
 
-        cover_url = None
-        if rawg_key:
-            try:
-                cover_url = buscar_capa_jogo_rawg(rawg_key, game_name.strip())
-            except (requests.RequestException, ValueError):
-                st.warning(f"Não foi possível carregar a capa de {game_name}.")
+        try:
+            cover_url = buscar_capa_jogo_cheapshark(game_name.strip())
+        except (requests.RequestException, ValueError):
+            st.warning(f"Não foi possível carregar a capa de {game_name}.")
+            cover_url = None
         cover_url = cover_url or _placeholder_data_uri(game_name.strip(), kind="game")
 
         with st.container(border=True):
@@ -699,7 +1007,7 @@ def _render_my_reviews(
 
 
 def _render_authenticated(
-    api: AuthAPI, token: str, rawg_key: str | None
+    api: AuthAPI, token: str
 ) -> None:
     cached_user = st.session_state.get("user_profile")
     if isinstance(cached_user, dict) and cached_user:
@@ -747,6 +1055,16 @@ def _render_authenticated(
             st.session_state["pagina"] = "minhas_reviews"
             st.session_state.pop("jogo_selecionado", None)
             st.rerun()
+        if st.button("🏷️ Promoções", width="stretch"):
+            st.session_state["pagina"] = "promocoes"
+            st.session_state.pop("jogo_selecionado", None)
+            st.rerun()
+        if st.button("🔍 Raio-X", width="stretch"):
+            st.session_state["pagina"] = "raiox"
+            st.session_state["raiox_origem"] = "inicio"
+            st.session_state.pop("raiox_jogo", None)
+            st.session_state.pop("jogo_selecionado", None)
+            st.rerun()
         if st.button("⚙️ Configurações", width="stretch"):
             st.session_state["pagina"] = "configuracoes"
             st.rerun()
@@ -756,80 +1074,125 @@ def _render_authenticated(
         _render_profile_settings(api, token, user)
         return
     if st.session_state.get("pagina") == "minhas_reviews":
-        _render_my_reviews(api, token, rawg_key)
+        _render_my_reviews(api, token)
+        return
+    if st.session_state.get("pagina") == "promocoes":
+        _render_promotions(api, token)
+        return
+    if st.session_state.get("pagina") == "raiox":
+        _render_xray_page()
         return
     if isinstance(jogo_selecionado, dict):
-        _render_game_review(api, token, rawg_key, jogo_selecionado)
+        _render_game_review(api, token, jogo_selecionado)
         game_name = jogo_selecionado.get("name")
         if isinstance(game_name, str) and game_name:
             _render_game_comments(api, token, game_name)
         return
 
-    st.write("Aqui você encontra os destaques e as últimas avaliações da comunidade.")
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric(label="Jogos Registrados", value="152")
-    with col2:
-        st.metric(label="Suas Avaliações", value="0")
-    with col3:
-        st.metric(label="Jogadores Ativos", value="34")
+    promotions: list[dict[str, Any]] = []
+    rate: Decimal | None = None
+    rating_averages: dict[str, GameRatingAverage] | None = None
+    try:
+        with st.spinner("Carregando ofertas em destaque..."):
+            promotions = buscar_ofertas_cheapshark()
+            rate, rate_date = buscar_cotacao_usd_brl()
+            try:
+                stores = buscar_lojas_cheapshark()
+            except (requests.RequestException, ValueError):
+                st.warning("Não foi possível carregar os nomes das lojas.")
+                stores = {}
+    except (requests.RequestException, ValueError):
+        st.error("Não foi possível carregar as ofertas em destaque.")
+    else:
+        rating_averages = _load_game_rating_averages(
+            api,
+            token,
+            [deal["title"] for deal in promotions],
+        )
+        _render_exchange_rate(rate, rate_date)
+        _render_promotion_carousel(
+            promotions,
+            rate,
+            stores,
+            rating_averages,
+        )
 
     st.divider()
-
-    # --- FEED DE JOGOS (Via API RAWG) ---
+    # --- Catálogo de jogos (CheapShark) ---
     st.write("### Catálogo de Jogos")
+    pesquisa = st.text_input(
+        "Procure um jogo para avaliar",
+        placeholder="Ex.: The Last of Us, FIFA, Mario...",
+    )
 
-    if rawg_key:
-        # 1. Barra de pesquisa
-        pesquisa = st.text_input("🔍 Procure um jogo para avaliar:", placeholder="Ex: The Last of Us, FIFA, Mario...")
+    if not pesquisa.strip():
+        _render_featured_games(
+            _featured_games_from_promotions(promotions),
+            rate,
+            rating_averages,
+        )
+    else:
+        try:
+            lista_de_jogos = buscar_jogos_cheapshark(pesquisa)
+        except (requests.RequestException, ValueError):
+            st.error("Não foi possível buscar jogos na CheapShark. Tente novamente.")
+            lista_de_jogos = []
 
-        # 2. Busca os jogos baseados na pesquisa
-        lista_de_jogos = buscar_jogos_rawg(rawg_key, pesquisa)
-
-        if not lista_de_jogos:
+        if pesquisa.strip() and not lista_de_jogos:
             st.warning("Nenhum jogo encontrado com esse nome.")
 
-        col_esquerda, col_direita = st.columns(2)
+        rate: Decimal | None = None
+        rate_date: date | None = None
+        if any(isinstance(game.get("cheapest"), Decimal) for game in lista_de_jogos):
+            try:
+                rate, rate_date = buscar_cotacao_usd_brl()
+                _render_exchange_rate(rate, rate_date)
+            except (requests.RequestException, ValueError):
+                st.error("Não foi possível converter os preços encontrados para reais.")
 
+        rating_averages = _load_game_rating_averages(
+            api,
+            token,
+            [game["name"] for game in lista_de_jogos],
+        )
+        col_esquerda, col_direita = st.columns(2)
         for index, jogo in enumerate(lista_de_jogos):
             coluna_atual = col_esquerda if index % 2 == 0 else col_direita
 
             with coluna_atual:
                 with st.container(border=True):
-                    # Exibe a imagem de capa
-                    cover_url = _url_capa_jogo(jogo)
                     st.image(
-                        cover_url,
+                        _url_capa_jogo(jogo),
                         alt=f"Capa de {jogo.get('name', 'jogo')}",
                         width="stretch",
                     )
+                    st.subheader(jogo["name"])
+                    st.caption(":material/computer: PC")
+                    _render_game_rating(jogo["name"], rating_averages)
+                    cheapest = jogo.get("cheapest")
+                    if isinstance(cheapest, Decimal) and rate is not None:
+                        st.metric(
+                            "Menor preço encontrado",
+                            _format_brl_price(cheapest, rate),
+                        )
+                    elif isinstance(cheapest, Decimal):
+                        st.caption("Menor preço disponível; cotação indisponível.")
 
-                    nome = jogo.get("name", "Desconhecido")
-                    st.subheader(nome)
-
-                    # Formatar data de lançamento
-                    data_completa = jogo.get("released", "")
-                    ano = data_completa.split("-")[0] if data_completa else "N/D"
-
-                    nota = jogo.get("rating", "0.0")
-
-                    plataformas = _game_platforms(jogo)
-                    if plataformas:
-                        st.caption(plataformas)
-
-                    st.caption(f"📅 Lançamento: {ano}")
-                    st.write(f"⭐ Nota global: **{nota} / 5.0**")
+                    deal_id = jogo.get("cheapest_deal_id")
+                    if isinstance(deal_id, str) and deal_id:
+                        st.link_button(
+                            "Ver menor oferta",
+                            promotion_url(deal_id),
+                            width="stretch",
+                        )
 
                     if st.button(
-                        "Fazer Avaliação",
-                        key=f"btn_avaliar_{jogo.get('id', index)}",
+                        "Fazer avaliação",
+                        key=f"btn_avaliar_{jogo['id']}",
                         width="stretch",
                     ):
                         st.session_state["jogo_selecionado"] = jogo
                         st.rerun()
-    else:
-        st.error("Chave da API RAWG não configurada no secrets.toml.")
 
     st.divider()
     st.write("### Últimas Avaliações")
@@ -873,14 +1236,8 @@ def main() -> None:
         return
 
     token = st.session_state.get("auth_token")
-    previous_token = st.session_state.get("_last_auth_token")
-    if token != previous_token:
-        _clear_cached_rawg_data()
-        st.session_state["_last_auth_token"] = token
-
     if isinstance(token, str) and token:
-        rawg_key = secrets.get("RAWG_API_KEY") or os.environ.get("RAWG_API_KEY")
-        _render_authenticated(api, token, rawg_key)
+        _render_authenticated(api, token)
     else:
         st.session_state.pop("auth_token", None)
         _render_auth_forms(api)

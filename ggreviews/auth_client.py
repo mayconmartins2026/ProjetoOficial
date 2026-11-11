@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -9,6 +10,7 @@ from urllib.parse import urlsplit, urlunsplit
 import requests
 
 from ggreviews.config import validate_api_base_url
+from ggreviews.game_compatibility import CATEGORY_FIELDS, normalize_preferences
 
 
 class AuthAPIError(Exception):
@@ -176,6 +178,203 @@ class AuthAPI:
         )
         return self._review_list(response)
 
+    def compatibility_preferences(self, token: str) -> dict[str, Any]:
+        response = self._request(
+            "GET",
+            "compatibilidade/preferencias",
+            token=token,
+            failure_message="Não foi possível carregar suas preferências de jogos.",
+        )
+        if "preferencias" not in response:
+            raise AuthAPIError(
+                "O serviço não retornou o perfil de compatibilidade.",
+                code="compatibility_preferences_invalid",
+            )
+        preferences = response.get("preferencias")
+        if preferences is None:
+            return normalize_preferences(None)
+        try:
+            return normalize_preferences(preferences)
+        except ValueError as error:
+            raise AuthAPIError(
+                "O serviço retornou preferências de compatibilidade inválidas.",
+                code="compatibility_preferences_invalid",
+            ) from error
+
+    def save_compatibility_preferences(
+        self, token: str, preferences: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        try:
+            normalized = normalize_preferences(preferences)
+        except ValueError as error:
+            raise AuthAPIError(
+                "As preferências informadas são inválidas.",
+                code="compatibility_preferences_invalid",
+            ) from error
+        response = self._request(
+            "PUT",
+            "compatibilidade/preferencias",
+            payload=normalized,
+            token=token,
+            failure_message="Não foi possível salvar suas preferências de jogos.",
+        )
+        saved = response.get("preferencias")
+        if not isinstance(saved, dict):
+            raise AuthAPIError(
+                "O serviço não confirmou o salvamento das preferências.",
+                code="compatibility_preferences_invalid",
+            )
+        try:
+            return normalize_preferences(saved)
+        except ValueError as error:
+            raise AuthAPIError(
+                "O serviço confirmou uma resposta inválida ao salvar suas preferências.",
+                code="compatibility_preferences_invalid",
+            ) from error
+
+    def compatibility_catalog(self, token: str) -> dict[str, Any]:
+        page_size = 100
+        maximum_pages = 20
+        games: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        vocabulary: dict[str, list[str]] | None = None
+
+        for page in range(1, maximum_pages + 2):
+            response = self._request(
+                "GET",
+                "compatibilidade/catalogo",
+                params={"page": page, "per_page": page_size},
+                token=token,
+                failure_message="Não foi possível carregar o catálogo de compatibilidade.",
+            )
+            raw_games = response.get("jogos")
+            if isinstance(raw_games, dict):
+                raw_games = (
+                    raw_games.get("items")
+                    or raw_games.get("data")
+                    or raw_games.get("results")
+                )
+            if not isinstance(raw_games, list):
+                raise AuthAPIError(
+                    "O serviço retornou uma página de catálogo inválida.",
+                    code="compatibility_catalog_invalid",
+                )
+            if page > maximum_pages:
+                if raw_games:
+                    raise AuthAPIError(
+                        "O catálogo excede o limite de páginas permitido.",
+                        code="compatibility_catalog_too_large",
+                    )
+                break
+
+            page_vocabulary = self._compatibility_vocabulary(
+                response.get("vocabulario")
+            )
+            if vocabulary is None:
+                vocabulary = page_vocabulary
+            elif vocabulary != page_vocabulary:
+                raise AuthAPIError(
+                    "O vocabulário do catálogo mudou durante a paginação.",
+                    code="compatibility_catalog_invalid",
+                )
+
+            for game in raw_games:
+                normalized_game = self._compatibility_catalog_game(game)
+                game_id = str(normalized_game.get("slug") or normalized_game["id"])
+                if game_id in seen_ids:
+                    raise AuthAPIError(
+                        "O catálogo retornou um jogo duplicado.",
+                        code="compatibility_catalog_invalid",
+                    )
+                seen_ids.add(game_id)
+                games.append(normalized_game)
+
+            if len(raw_games) < page_size:
+                break
+
+        if vocabulary is None:
+            raise AuthAPIError(
+                "O serviço não retornou o vocabulário do catálogo.",
+                code="compatibility_catalog_invalid",
+            )
+        return {"jogos": games, "vocabulario": vocabulary}
+
+    @staticmethod
+    def _compatibility_vocabulary(value: Any) -> dict[str, list[str]]:
+        if not isinstance(value, dict):
+            raise AuthAPIError(
+                "O serviço retornou um vocabulário de catálogo inválido.",
+                code="compatibility_catalog_invalid",
+            )
+        result: dict[str, list[str]] = {}
+        for field in CATEGORY_FIELDS:
+            values = value.get(field)
+            if (
+                not isinstance(values, list)
+                or any(not isinstance(item, str) or not item.strip() for item in values)
+            ):
+                raise AuthAPIError(
+                    "O serviço retornou opções de catálogo inválidas.",
+                    code="compatibility_catalog_invalid",
+                )
+            result[field] = list(dict.fromkeys(item.strip() for item in values))
+        return result
+
+    @staticmethod
+    def _compatibility_catalog_game(value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            raise AuthAPIError(
+                "O catálogo contém um jogo inválido.",
+                code="compatibility_catalog_invalid",
+            )
+        game_id = value.get("id")
+        slug = value.get("slug")
+        title = value.get("titulo")
+        description = value.get("descricao")
+        source_url = value.get("fonte_url")
+        if (
+            isinstance(game_id, bool)
+            or not isinstance(game_id, (int, str))
+            or not str(game_id).strip()
+            or not isinstance(slug, str)
+            or not slug.strip()
+            or not isinstance(title, str)
+            or not title.strip()
+            or not isinstance(description, str)
+            or not description.strip()
+            or not isinstance(source_url, str)
+            or not source_url.startswith("https://")
+        ):
+            raise AuthAPIError(
+                "O catálogo contém um jogo sem identidade, descrição ou fonte válida.",
+                code="compatibility_catalog_invalid",
+            )
+        game = dict(value)
+        for field in CATEGORY_FIELDS:
+            items = value.get(field)
+            if items is not None and (
+                not isinstance(items, list)
+                or any(not isinstance(item, str) or not item.strip() for item in items)
+            ):
+                raise AuthAPIError(
+                    "O catálogo contém atributos de jogo inválidos.",
+                    code="compatibility_catalog_invalid",
+                )
+            game[field] = (
+                list(dict.fromkeys(item.strip() for item in items))
+                if isinstance(items, list)
+                else None
+            )
+        cheapshark_id = value.get("cheapshark_game_id")
+        if cheapshark_id is not None and (
+            not isinstance(cheapshark_id, str) or not cheapshark_id.isdigit()
+        ):
+            raise AuthAPIError(
+                "O catálogo contém um identificador CheapShark inválido.",
+                code="compatibility_catalog_invalid",
+            )
+        return game
+
     @staticmethod
     def _review_list(response: dict[str, Any]) -> list[dict[str, Any]]:
         reviews = response.get("avaliacoes")
@@ -254,6 +453,11 @@ class AuthAPI:
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         headers = {"Accept": "application/json"}
+        service_name = (
+            "serviço de compatibilidade"
+            if path.startswith("compatibilidade/")
+            else "serviço de autenticação"
+        )
         if token:
             headers["Authorization"] = "Bearer " + token
 
@@ -276,16 +480,22 @@ class AuthAPI:
             )
         except requests.Timeout:
             raise AuthAPIError(
-                "O serviço de autenticação demorou para responder. Tente novamente.",
+                f"O {service_name} demorou para responder. Tente novamente.",
                 code="timeout",
             ) from None
         except requests.RequestException:
             raise AuthAPIError(
-                "Não foi possível conectar ao serviço de autenticação.",
+                f"Não foi possível conectar ao {service_name}.",
                 code="connection_error",
             ) from None
 
         if response.status_code in (401, 403):
+            if path.startswith("compatibilidade/"):
+                raise AuthAPIError(
+                    f"{failure_message} (HTTP {response.status_code}; "
+                    "a API não autorizou a requisição).",
+                    code="compatibility_unauthorized",
+                )
             if path == "auth/login":
                 raise AuthAPIError(
                     "E-mail ou senha inválidos.", code="invalid_credentials"
@@ -320,6 +530,18 @@ class AuthAPI:
             raise AuthAPIError(failure_message)
 
         if not response.ok:
+            if path.startswith("compatibilidade/") and response.status_code == 404:
+                raise AuthAPIError(
+                    f"O endpoint Xano de compatibilidade ({path}) ainda não foi publicado.",
+                    code="compatibility_endpoint_missing",
+                )
+            if path.startswith("compatibilidade/"):
+                detail = self._error_message(response)
+                detail_suffix = f": {detail}" if detail else ""
+                raise AuthAPIError(
+                    f"{failure_message} (HTTP {response.status_code}{detail_suffix}).",
+                    code="compatibility_unavailable",
+                )
             if path == "avalia_es" and response.status_code == 404:
                 raise AuthAPIError(
                     "O endpoint de avaliações avalia_es não foi publicado no Xano."
@@ -362,12 +584,12 @@ class AuthAPI:
             data = response.json()
         except ValueError:
             raise AuthAPIError(
-                "O serviço de autenticação retornou uma resposta inválida."
+                f"O {service_name} retornou uma resposta inválida."
             ) from None
 
         if not isinstance(data, dict):
             raise AuthAPIError(
-                "O serviço de autenticação retornou uma resposta inválida."
+                f"O {service_name} retornou uma resposta inválida."
             )
         return data
 

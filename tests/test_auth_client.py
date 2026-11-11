@@ -218,6 +218,187 @@ class AuthClientTests(unittest.TestCase):
         self.assertTrue(request.kwargs["headers"]["Authorization"])
         self.assertEqual(reviews[0]["nome_jogo"], "God of War")
 
+    def test_compatibility_preferences_load_and_save_with_bearer_auth(self) -> None:
+        saved = {
+            "generos": ["Ação"],
+            "estilos": ["Roguelike"],
+            "narrativa": 4,
+            "exploracao": 2,
+            "dificuldade": 2,
+            "modos": ["Single-player"],
+            "plataformas": ["PC"],
+        }
+        self.session.request.side_effect = [
+            self.response(200, {"preferencias": saved}),
+            self.response(200, {"preferencias": saved}),
+        ]
+
+        loaded = self.api.compatibility_preferences("secret-token")
+        persisted = self.api.save_compatibility_preferences("secret-token", saved)
+
+        self.assertEqual(loaded, saved)
+        self.assertEqual(persisted, saved)
+        get_request, put_request = self.session.request.call_args_list
+        self.assertEqual(
+            get_request.args[1],
+            "https://example.xano.io/api:ZnpRG7wg/compatibilidade/preferencias",
+        )
+        self.assertTrue(get_request.kwargs["headers"]["Authorization"])
+        self.assertEqual(put_request.args[:2], (
+            "PUT",
+            "https://example.xano.io/api:ZnpRG7wg/compatibilidade/preferencias",
+        ))
+        self.assertEqual(put_request.kwargs["json"], saved)
+        self.assertTrue(put_request.kwargs["headers"]["Authorization"])
+
+    def test_compatibility_preferences_reject_invalid_success_payload(self) -> None:
+        self.session.request.return_value = self.response(200, {})
+
+        with self.assertRaises(AuthAPIError) as raised:
+            self.api.compatibility_preferences("secret-token")
+
+        self.assertEqual(
+            raised.exception.code,
+            "compatibility_preferences_invalid",
+        )
+
+    def test_compatibility_save_does_not_accept_missing_confirmation(self) -> None:
+        self.session.request.return_value = self.response(200, {})
+        preferences = {
+            "generos": [],
+            "estilos": [],
+            "narrativa": None,
+            "exploracao": None,
+            "dificuldade": None,
+            "modos": [],
+            "plataformas": [],
+        }
+
+        with self.assertRaises(AuthAPIError) as raised:
+            self.api.save_compatibility_preferences("secret-token", preferences)
+
+        self.assertEqual(
+            raised.exception.code,
+            "compatibility_preferences_invalid",
+        )
+
+    def test_compatibility_catalog_loads_controlled_vocabulary(self) -> None:
+        game = {
+            "id": 11,
+            "slug": "hades",
+            "titulo": "Hades",
+            "descricao": "Um roguelike de ação.",
+            "generos": ["Ação"],
+            "estilos": ["Roguelike"],
+            "narrativa": 4,
+            "exploracao": 2,
+            "dificuldade": 2,
+            "modos": ["Single-player"],
+            "plataformas": ["PC"],
+            "fonte_url": "https://store.steampowered.com/app/1145360/Hades/",
+            "cheapshark_game_id": "196149",
+        }
+        vocabulary = {
+            "generos": ["Ação"],
+            "estilos": ["Roguelike"],
+            "modos": ["Single-player"],
+            "plataformas": ["PC"],
+        }
+        self.session.request.return_value = self.response(
+            200,
+            {"jogos": [game], "vocabulario": vocabulary},
+        )
+
+        result = self.api.compatibility_catalog("secret-token")
+
+        request = self.session.request.call_args
+        self.assertEqual(
+            request.args[1],
+            "https://example.xano.io/api:ZnpRG7wg/compatibilidade/catalogo",
+        )
+        self.assertEqual(request.kwargs["params"], {"page": 1, "per_page": 100})
+        self.assertTrue(request.kwargs["headers"]["Authorization"])
+        self.assertEqual(result["jogos"], [game])
+        self.assertEqual(result["vocabulario"], vocabulary)
+
+    def test_compatibility_catalog_reads_all_pages(self) -> None:
+        vocabulary = {
+            "generos": ["Ação"],
+            "estilos": ["Roguelike"],
+            "modos": ["Single-player"],
+            "plataformas": ["PC"],
+        }
+
+        def game(index: int) -> dict[str, object]:
+            return {
+                "id": index,
+                "slug": f"game-{index}",
+                "titulo": f"Game {index}",
+                "descricao": "Descrição.",
+                "fonte_url": "https://example.com/game",
+            }
+
+        first_page = [game(index) for index in range(100)]
+        second_page = [game(100)]
+
+        def respond(method: str, url: str, **kwargs: object) -> Mock:
+            page = kwargs["params"]["page"]
+            games = first_page if page == 1 else second_page if page == 2 else []
+            return self.response(
+                200,
+                {"jogos": games, "vocabulario": vocabulary},
+            )
+
+        self.session.request.side_effect = respond
+
+        result = self.api.compatibility_catalog("secret-token")
+
+        self.assertEqual(len(result["jogos"]), 101)
+        self.assertEqual(self.session.request.call_count, 2)
+        self.assertEqual(
+            self.session.request.call_args_list[1].kwargs["params"],
+            {"page": 2, "per_page": 100},
+        )
+
+    def test_compatibility_catalog_rejects_missing_sources(self) -> None:
+        game = {
+            "id": 11,
+            "slug": "hades",
+            "titulo": "Hades",
+            "descricao": "Descrição.",
+            "fonte_url": "http://insecure.example/game",
+        }
+        vocabulary = {
+            "generos": [],
+            "estilos": [],
+            "modos": [],
+            "plataformas": [],
+        }
+        self.session.request.return_value = self.response(
+            200,
+            {"jogos": [game], "vocabulario": vocabulary},
+        )
+
+        with self.assertRaises(AuthAPIError) as raised:
+            self.api.compatibility_catalog("secret-token")
+
+        self.assertEqual(
+            raised.exception.code,
+            "compatibility_catalog_invalid",
+        )
+
+    def test_compatibility_endpoint_missing_is_reported_explicitly(self) -> None:
+        self.session.request.return_value = self.response(404, {"message": "missing"})
+
+        with self.assertRaises(AuthAPIError) as raised:
+            self.api.compatibility_preferences("secret-token")
+
+        self.assertEqual(
+            raised.exception.code,
+            "compatibility_endpoint_missing",
+        )
+        self.assertIn("não foi publicado", raised.exception.message)
+
     def test_profile_photo_uses_multipart_upload(self) -> None:
         self.session.request.return_value = self.response(
             200,

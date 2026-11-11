@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import base64
+import os
 import re
 from datetime import date, datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
 import requests
 import streamlit as st
+from dotenv import load_dotenv
 from streamlit.errors import StreamlitSecretNotFoundError
 
 from ggreviews.auth_client import (
@@ -24,7 +27,11 @@ from ggreviews.cheapshark_client import (
     fetch_store_names,
     fetch_usd_to_brl_rate,
     promotion_url,
-    search_games,
+)
+from ggreviews.game_compatibility import (
+    default_preferences,
+    normalize_preferences,
+    recommend_games,
 )
 
 
@@ -355,14 +362,24 @@ def _render_game_review(
 
     st.title(game_name)
     ratings = _load_game_rating_averages(api, token, [game_name])
-    _render_game_rating(game_name, ratings)
     _render_xray_badge(
         game_name,
         key=f"review_xray_{game.get('id', game_name)}",
         origin="review",
     )
     cover_url = _url_capa_jogo(game)
-    st.image(cover_url, alt=f"Capa de {game_name}", width="stretch")
+    cover_column, details_column = st.columns([1, 2])
+    with cover_column:
+        st.image(cover_url, alt=f"Capa de {game_name}", width="stretch")
+    with details_column:
+        _render_game_rating(game_name, ratings, label="Nota atual no site")
+        st.subheader("Sobre o jogo")
+        summary = game.get("summary")
+        if isinstance(summary, str) and summary.strip():
+            summary = summary.strip()
+            st.write(f"{summary[:400].rstrip()}{'…' if len(summary) > 400 else ''}")
+        else:
+            st.caption("Descrição indisponível.")
 
     cheapest = game.get("cheapest")
     if isinstance(cheapest, Decimal):
@@ -520,14 +537,162 @@ def buscar_cotacao_usd_brl() -> tuple[Decimal, date]:
     return fetch_usd_to_brl_rate()
 
 
+def _buscar_jogos_igdb_por_query(query: str) -> list[dict[str, Any]]:
+    load_dotenv(Path(__file__).resolve().with_name(".env"))
+    client_id = os.getenv("TWITCH_CLIENT_ID", "").strip()
+    client_secret = os.getenv("TWITCH_CLIENT_SECRET", "").strip()
+    if not client_id or not client_secret:
+        raise ValueError(
+            "Defina TWITCH_CLIENT_ID e TWITCH_CLIENT_SECRET no ficheiro .env."
+        )
+
+    token_response = requests.post(
+        "https://id.twitch.tv/oauth2/token",
+        data={
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "grant_type": "client_credentials",
+        },
+        timeout=15,
+    )
+    token_response.raise_for_status()
+    token_payload = token_response.json()
+    access_token = (
+        token_payload.get("access_token") if isinstance(token_payload, dict) else None
+    )
+    if not isinstance(access_token, str) or not access_token:
+        raise ValueError("A Twitch não retornou um Access Token válido.")
+
+    games_response = requests.post(
+        "https://api.igdb.com/v4/games",
+        headers={
+            "Client-ID": client_id,
+            "Authorization": f"Bearer {access_token}",
+        },
+        data=query,
+        timeout=15,
+    )
+    games_response.raise_for_status()
+    games_payload = games_response.json()
+    if not isinstance(games_payload, list):
+        raise ValueError("A resposta do IGDB não contém uma lista de jogos.")
+    return [game for game in games_payload if isinstance(game, dict)]
+
+
 @st.cache_data(ttl=3600, max_entries=128)
-def buscar_jogos_cheapshark(termo_busca: str) -> list[dict[str, Any]]:
-    return search_games(termo_busca)
+def buscar_jogos_igdb(termo_busca: str) -> list[dict[str, Any]]:
+    termo_busca = " ".join(termo_busca.split())
+    if not termo_busca:
+        return []
+
+    termo_escapado = termo_busca.replace("\\", "\\\\").replace('"', '\\"')
+    query = (
+        f'search "{termo_escapado}"; '
+        "fields id,name,slug,cover.image_id,first_release_date,summary,"
+        "genres.name,themes.name,game_modes.name,platforms.name; "
+        "limit 20;"
+    )
+    games_payload = _buscar_jogos_igdb_por_query(query)
+
+    games: list[dict[str, Any]] = []
+    for game in games_payload:
+        if not isinstance(game, dict) or not isinstance(game.get("name"), str):
+            continue
+        cover = game.get("cover")
+        image_id = cover.get("image_id") if isinstance(cover, dict) else None
+        games.append(
+            {
+                **game,
+                "background_image": (
+                    f"https://images.igdb.com/igdb/image/upload/t_cover_big/{image_id}.jpg"
+                    if isinstance(image_id, str) and image_id
+                    else None
+                ),
+            }
+        )
+    return games
+
+
+@st.cache_data(ttl=21600, max_entries=1)
+def buscar_catalogo_compatibilidade_igdb() -> dict[str, Any]:
+    games = _buscar_jogos_igdb_por_query(
+        "fields id,name,slug,summary,cover.image_id,genres.name,themes.name,"
+        "game_modes.name,platforms.name; "
+        "where rating_count > 10 & cover != null; "
+        "sort rating_count desc; "
+        "limit 500;"
+    )
+    catalog_games: list[dict[str, Any]] = []
+    vocabulary: dict[str, set[str]] = {
+        "generos": set(),
+        "estilos": set(),
+        "modos": set(),
+        "plataformas": set(),
+    }
+
+    for game in games:
+        title = game.get("name")
+        if not isinstance(title, str) or not title.strip():
+            continue
+
+        cover = game.get("cover")
+        image_id = cover.get("image_id") if isinstance(cover, dict) else None
+        traits: dict[str, list[str]] = {}
+        for field, source_field in (
+            ("generos", "genres"),
+            ("estilos", "themes"),
+            ("modos", "game_modes"),
+            ("plataformas", "platforms"),
+        ):
+            source_values = game.get(source_field)
+            values = list(
+                dict.fromkeys(
+                    item["name"].strip()
+                    for item in source_values
+                    if isinstance(item, dict)
+                    and isinstance(item.get("name"), str)
+                    and item["name"].strip()
+                )
+            ) if isinstance(source_values, list) else []
+            traits[field] = values
+            vocabulary[field].update(values)
+
+        slug = game.get("slug")
+        catalog_games.append(
+            {
+                "id": game.get("id"),
+                "slug": slug if isinstance(slug, str) else str(game.get("id")),
+                "titulo": title.strip(),
+                "descricao": game.get("summary")
+                if isinstance(game.get("summary"), str)
+                else "",
+                **traits,
+                "url_capa": (
+                    f"https://images.igdb.com/igdb/image/upload/"
+                    f"t_cover_big/{image_id}.jpg"
+                    if isinstance(image_id, str) and image_id
+                    else None
+                ),
+                "fonte_url": (
+                    f"https://www.igdb.com/games/{slug}"
+                    if isinstance(slug, str) and slug
+                    else None
+                ),
+            }
+        )
+
+    return {
+        "jogos": catalog_games,
+        "vocabulario": {
+            field: sorted(values, key=str.casefold)
+            for field, values in vocabulary.items()
+        },
+    }
 
 
 @st.cache_data(ttl=3600, max_entries=256)
-def buscar_capa_jogo_cheapshark(nome_jogo: str) -> str | None:
-    jogos = search_games(nome_jogo)
+def buscar_capa_jogo_igdb(nome_jogo: str) -> str | None:
+    jogos = buscar_jogos_igdb(nome_jogo)
     nome_normalizado = nome_jogo.strip().casefold()
     jogo = next(
         (item for item in jogos if item["name"].casefold() == nome_normalizado),
@@ -602,6 +767,8 @@ def _load_game_rating_averages(
 def _render_game_rating(
     game_name: str,
     averages: dict[str, GameRatingAverage] | None,
+    *,
+    label: str = "Média da comunidade",
 ) -> None:
     if averages is None:
         st.caption("Média da comunidade indisponível.")
@@ -613,7 +780,7 @@ def _render_game_rating(
 
     formatted_average = f"{rating.average:.1f}".replace(".", ",")
     st.caption(
-        f"⭐ Média da comunidade: {formatted_average}/5 · "
+        f"⭐ {label}: {formatted_average}/5 · "
         f"{rating.total} avaliação(ões)"
     )
 
@@ -715,6 +882,266 @@ def _render_xray_page() -> None:
         st.session_state.pop("raiox_jogo", None)
         st.session_state["pagina"] = "inicio" if origin == "review" else origin
         st.rerun()
+
+
+def _render_compatibility_result(result: Any, index: int) -> None:
+    game = dict(result.game)
+    title = game["titulo"]
+    game["background_image"] = game.get("url_capa")
+    key = str(game.get("slug") or game.get("id") or index)
+    with st.container(border=True):
+        cover_column, details_column = st.columns([1, 2])
+        with cover_column:
+            st.image(
+                _url_capa_jogo(game),
+                alt=f"Capa de {title}",
+                width="stretch",
+            )
+        with details_column:
+            st.subheader(title)
+            genres = game.get("generos")
+            st.caption(
+                "Gêneros: "
+                + (
+                    ", ".join(genres)
+                    if isinstance(genres, list) and genres
+                    else "Sem dados"
+                )
+            )
+            themes = game.get("estilos")
+            st.caption(
+                "Temas: "
+                + (
+                    ", ".join(themes)
+                    if isinstance(themes, list) and themes
+                    else "Sem dados"
+                )
+            )
+            platforms = game.get("plataformas")
+            st.caption(
+                "Plataformas: "
+                + (
+                    ", ".join(platforms)
+                    if isinstance(platforms, list) and platforms
+                    else "Sem dados"
+                )
+            )
+            description = game.get("descricao")
+            st.write(description if description else "Descrição não disponível.")
+            if result.score is None:
+                st.info(
+                    "Dados insuficientes para exibir uma porcentagem confiável."
+                )
+            else:
+                st.metric(
+                    "Compatibilidade com seu perfil",
+                    f"{result.score}%",
+                    help=(
+                        "Aderência determinística às preferências informadas, "
+                        "normalizada pelos critérios com dados conhecidos."
+                    ),
+                )
+            st.caption(f"Cobertura dos dados avaliados: {result.coverage}%")
+
+        if result.justifications:
+            st.markdown(
+                "**Por que este jogo combina**"
+                if result.score is not None
+                else "**Dados considerados**"
+            )
+            for justification in result.justifications:
+                st.write(f"- {justification}")
+
+        source_url = game.get("fonte_url")
+        source_date = game.get("fonte_atualizada_em")
+        formatted_source_date = _format_review_date(source_date)
+        if formatted_source_date != "Data não disponível":
+            st.caption(f"Metadados revisados em {formatted_source_date}.")
+        if isinstance(source_url, str) and source_url.startswith("https://"):
+            st.link_button(
+                "Ver fonte dos dados",
+                source_url,
+                key=f"compat_source_{key}",
+            )
+
+
+def _render_compatibility(api: AuthAPI, token: str) -> None:
+    st.title("Inteligência de Compatibilidade")
+    st.write(
+        "Conte o que você gosta em um jogo para descobrir opções que combinam "
+        "com seu perfil."
+    )
+    if st.button("Voltar ao início", key="compatibility_home"):
+        st.session_state["pagina"] = "inicio"
+        st.rerun()
+
+    if "compatibility_catalog" not in st.session_state:
+        try:
+            with st.spinner("Carregando características dos jogos do IGDB..."):
+                st.session_state["compatibility_catalog"] = (
+                    buscar_catalogo_compatibilidade_igdb()
+                )
+        except (requests.RequestException, ValueError) as error:
+            st.error(f"Não foi possível carregar o catálogo do IGDB: {error}")
+            return
+
+    catalog = st.session_state["compatibility_catalog"]
+    vocabulary = catalog["vocabulario"]
+    if "compatibility_preferences" not in st.session_state:
+        try:
+            st.session_state["compatibility_preferences"] = (
+                api.compatibility_preferences(token)
+            )
+        except AuthAPIError as error:
+            st.error(error.message)
+            return
+
+    try:
+        preferences = normalize_preferences(
+            st.session_state["compatibility_preferences"],
+            vocabulary,
+        )
+    except ValueError:
+        st.warning(
+            "Algumas preferências salvas não existem mais no catálogo. "
+            "Revise as opções antes de salvar."
+        )
+        preferences = default_preferences()
+        for key in (
+            "compatibility_genres",
+            "compatibility_styles",
+            "compatibility_modes",
+            "compatibility_platforms",
+        ):
+            st.session_state.pop(key, None)
+
+    for key, field in (
+        ("compatibility_genres", "generos"),
+        ("compatibility_styles", "estilos"),
+        ("compatibility_modes", "modos"),
+        ("compatibility_platforms", "plataformas"),
+    ):
+        selected = st.session_state.get(key)
+        if isinstance(selected, list) and any(
+            value not in vocabulary[field] for value in selected
+        ):
+            st.session_state.pop(key, None)
+
+    with st.form("compatibility_form"):
+        st.subheader("Suas preferências")
+        genres = st.multiselect(
+            "Gêneros favoritos",
+            vocabulary["generos"],
+            default=preferences["generos"],
+            key="compatibility_genres",
+        )
+        styles = st.multiselect(
+            "Temas favoritos",
+            vocabulary["estilos"],
+            default=preferences["estilos"],
+            key="compatibility_styles",
+        )
+        modes = st.multiselect(
+            "Modo de jogo",
+            vocabulary["modos"],
+            default=preferences["modos"],
+            key="compatibility_modes",
+        )
+        platforms = st.multiselect(
+            "Plataformas utilizadas",
+            vocabulary["plataformas"],
+            default=preferences["plataformas"],
+            key="compatibility_platforms",
+        )
+        save_preferences = st.form_submit_button("Salvar preferências")
+        generate_recommendations = st.form_submit_button(
+            "Salvar e ver recomendações",
+            type="primary",
+        )
+
+    if save_preferences or generate_recommendations:
+        draft = {
+            "generos": genres,
+            "estilos": styles,
+            "narrativa": preferences["narrativa"],
+            "exploracao": preferences["exploracao"],
+            "dificuldade": preferences["dificuldade"],
+            "modos": modes,
+            "plataformas": platforms,
+        }
+        try:
+            normalized = normalize_preferences(draft, vocabulary)
+        except ValueError as error:
+            st.error(f"Revise as preferências informadas: {error}")
+            return
+        try:
+            saved_preferences = api.save_compatibility_preferences(
+                token,
+                normalized,
+            )
+        except AuthAPIError as error:
+            st.error(error.message)
+            return
+        st.session_state["compatibility_preferences"] = saved_preferences
+        st.session_state.pop("compatibility_results", None)
+        st.success("Preferências salvas na sua conta.")
+
+        if generate_recommendations:
+            if not any(normalized[field] for field in ("generos", "estilos", "modos")):
+                st.info("Informe ao menos uma preferência para gerar recomendações.")
+            else:
+                st.session_state["compatibility_results"] = recommend_games(
+                    normalized,
+                    catalog["jogos"],
+                )
+
+    st.divider()
+    with st.expander("Como a compatibilidade é calculada"):
+        st.write(
+            "Gêneros têm peso de 50%, temas 30% e modos de jogo 20%. Cada "
+            "categoria compara as opções selecionadas com os atributos do IGDB. "
+            "Plataformas são um filtro: o jogo precisa estar confirmado em ao "
+            "menos uma plataforma escolhida."
+        )
+        st.write(
+            "Critérios não respondidos não entram no cálculo. Dados desconhecidos "
+            "não contam como incompatibilidade. A porcentagem só aparece quando "
+            "há dados para pelo menos 70% do peso respondido; abaixo disso, o "
+            "card informa que não há dados suficientes. A nota é uma aderência "
+            "ao perfil, não uma previsão de satisfação."
+        )
+
+    if not catalog["jogos"]:
+        st.warning(
+            "O IGDB não retornou jogos com características suficientes para "
+            "gerar recomendações."
+        )
+        return
+
+    results = st.session_state.get("compatibility_results")
+    if not isinstance(results, list):
+        st.info("Salve suas preferências e selecione “Salvar e ver recomendações”.")
+        return
+
+    scored_results = [result for result in results if result.score is not None]
+    insufficient_results = [result for result in results if result.score is None]
+    if scored_results:
+        st.subheader("Jogos que combinam com você")
+        for index, result in enumerate(scored_results[:12]):
+            _render_compatibility_result(result, index)
+    if insufficient_results:
+        st.subheader("Jogos sem dados suficientes")
+        st.caption(
+            "Estes jogos não recebem porcentagem nem entram no ranking por falta "
+            "de metadados para avaliar seu perfil."
+        )
+        for index, result in enumerate(insufficient_results[:6], start=12):
+            _render_compatibility_result(result, index)
+    if not results:
+        st.info(
+            "Não encontramos recomendações confiáveis. Revise as plataformas "
+            "selecionadas ou tente outras preferências."
+        )
 
 
 def _render_promotion_card(
@@ -985,7 +1412,7 @@ def _render_my_reviews(
             continue
 
         try:
-            cover_url = buscar_capa_jogo_cheapshark(game_name.strip())
+            cover_url = buscar_capa_jogo_igdb(game_name.strip())
         except (requests.RequestException, ValueError):
             st.warning(f"Não foi possível carregar a capa de {game_name}.")
             cover_url = None
@@ -1027,12 +1454,36 @@ def _render_authenticated(
 
     user.update(st.session_state.get("user_profile", {}))
     nome_utilizador = user.get('name') or user.get('email') or 'Jogador'
+    compatibility_owner = str(user.get("id") or user.get("email") or token)
+    if st.session_state.get("compatibility_owner") != compatibility_owner:
+        for key in (
+            "compatibility_catalog",
+            "compatibility_preferences",
+            "compatibility_results",
+            "compatibility_genres",
+            "compatibility_styles",
+            "compatibility_narrative",
+            "compatibility_exploration",
+            "compatibility_difficulty",
+            "compatibility_modes",
+            "compatibility_platforms",
+        ):
+            st.session_state.pop(key, None)
+        st.session_state["compatibility_owner"] = compatibility_owner
 
     # --- BARRA LATERAL (SIDEBAR) ---
     with st.sidebar:
         st.title("Menu GGReviews")
         if st.button("Sair", width="stretch", type="primary"):
             st.session_state.pop("auth_token", None)
+            st.session_state.pop("user_profile", None)
+            st.session_state.pop("compatibility_owner", None)
+            for key in (
+                "compatibility_catalog",
+                "compatibility_preferences",
+                "compatibility_results",
+            ):
+                st.session_state.pop(key, None)
             st.rerun()
 
         avatar = _url_imagem_perfil(user.get("img_perfil"), api)
@@ -1059,6 +1510,10 @@ def _render_authenticated(
             st.session_state["pagina"] = "promocoes"
             st.session_state.pop("jogo_selecionado", None)
             st.rerun()
+        if st.button("🎯 Inteligência de Compatibilidade", width="stretch"):
+            st.session_state["pagina"] = "compatibilidade"
+            st.session_state.pop("jogo_selecionado", None)
+            st.rerun()
         if st.button("🔍 Raio-X", width="stretch"):
             st.session_state["pagina"] = "raiox"
             st.session_state["raiox_origem"] = "inicio"
@@ -1078,6 +1533,9 @@ def _render_authenticated(
         return
     if st.session_state.get("pagina") == "promocoes":
         _render_promotions(api, token)
+        return
+    if st.session_state.get("pagina") == "compatibilidade":
+        _render_compatibility(api, token)
         return
     if st.session_state.get("pagina") == "raiox":
         _render_xray_page()
@@ -1118,7 +1576,7 @@ def _render_authenticated(
         )
 
     st.divider()
-    # --- Catálogo de jogos (CheapShark) ---
+    # --- Catálogo de jogos (IGDB) ---
     st.write("### Catálogo de Jogos")
     pesquisa = st.text_input(
         "Procure um jogo para avaliar",
@@ -1133,9 +1591,12 @@ def _render_authenticated(
         )
     else:
         try:
-            lista_de_jogos = buscar_jogos_cheapshark(pesquisa)
+            lista_de_jogos = buscar_jogos_igdb(pesquisa)
         except (requests.RequestException, ValueError):
-            st.error("Não foi possível buscar jogos na CheapShark. Tente novamente.")
+            st.error(
+                "Não foi possível buscar jogos na IGDB. "
+                "Verifique a configuração da Twitch."
+            )
             lista_de_jogos = []
 
         if pesquisa.strip() and not lista_de_jogos:
@@ -1167,7 +1628,21 @@ def _render_authenticated(
                         width="stretch",
                     )
                     st.subheader(jogo["name"])
-                    st.caption(":material/computer: PC")
+                    platforms = jogo.get("platforms")
+                    platform_names = [
+                        platform["name"]
+                        for platform in platforms
+                        if isinstance(platform, dict)
+                        and isinstance(platform.get("name"), str)
+                    ] if isinstance(platforms, list) else []
+                    st.caption(
+                        ":material/sports_esports: "
+                        + (
+                            ", ".join(platform_names)
+                            if platform_names
+                            else "Plataformas não informadas"
+                        )
+                    )
                     _render_game_rating(jogo["name"], rating_averages)
                     cheapest = jogo.get("cheapest")
                     if isinstance(cheapest, Decimal) and rate is not None:

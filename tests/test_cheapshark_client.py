@@ -10,6 +10,7 @@ import requests
 from ggreviews.cheapshark_client import (
     CHEAPSHARK_API_BASE,
     EXCHANGE_RATE_URL,
+    fetch_game_details,
     fetch_promotions,
     fetch_store_names,
     fetch_usd_to_brl_rate,
@@ -65,6 +66,52 @@ class CheapSharkClientTests(unittest.TestCase):
     def test_empty_game_search_does_not_call_api(self, get: Mock) -> None:
         self.assertEqual(search_games("  "), [])
         get.assert_not_called()
+
+    @patch("ggreviews.cheapshark_client.requests.get")
+    def test_fetch_game_details_uses_curated_cheapshark_id(self, get: Mock) -> None:
+        get.return_value = json_response(
+            {
+                "info": {
+                    "title": "Hades",
+                    "thumb": "https://images.example/hades.jpg",
+                },
+                "deals": [
+                    {"dealID": "deal-2", "price": "12.99"},
+                    {"dealID": "deal-1", "price": "8.49"},
+                    {"dealID": "invalid", "price": "not-a-price"},
+                ],
+            }
+        )
+
+        details = fetch_game_details("196149")
+
+        self.assertEqual(
+            details,
+            {
+                "id": "196149",
+                "name": "Hades",
+                "background_image": "https://images.example/hades.jpg",
+                "deal_id": "deal-1",
+                "sale_price": Decimal("8.49"),
+            },
+        )
+        get.assert_called_once_with(
+            f"{CHEAPSHARK_API_BASE}/games",
+            params={"id": "196149"},
+            headers={"User-Agent": "GGReviews/1.0"},
+            timeout=10,
+        )
+
+    @patch("ggreviews.cheapshark_client.requests.get")
+    def test_fetch_game_details_handles_missing_match_and_rejects_bad_id(
+        self, get: Mock
+    ) -> None:
+        get.return_value = json_response({"info": None})
+
+        self.assertIsNone(fetch_game_details("196149"))
+        with self.assertRaises(ValueError):
+            fetch_game_details("not-an-id")
+        get.assert_called_once()
 
     @patch("ggreviews.cheapshark_client.requests.get")
     def test_fetch_promotions_keeps_valid_discounted_deals(self, get: Mock) -> None:

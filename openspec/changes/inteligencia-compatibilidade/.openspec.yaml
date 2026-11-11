@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-11-09
+goal: Entregar recomendações explicáveis com pontuação determinística e
+  persistência segura do perfil de compatibilidade.

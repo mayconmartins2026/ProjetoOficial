@@ -85,6 +85,57 @@ def search_games(title: str) -> list[dict[str, Any]]:
     return games
 
 
+def fetch_game_details(game_id: str) -> dict[str, Any] | None:
+    if not isinstance(game_id, str) or not game_id.isdigit():
+        raise ValueError("O identificador CheapShark do jogo é inválido.")
+
+    payload = _get_json(
+        f"{CHEAPSHARK_API_BASE}/games",
+        params={"id": game_id},
+    )
+    if not isinstance(payload, dict):
+        raise ValueError("A CheapShark não retornou os detalhes do jogo.")
+    info = payload.get("info")
+    if not isinstance(info, dict):
+        return None
+
+    title = info.get("title")
+    if not isinstance(title, str) or not title.strip():
+        raise ValueError("A CheapShark retornou um título de jogo inválido.")
+
+    cover = info.get("thumb")
+    result: dict[str, Any] = {
+        "id": game_id,
+        "name": title.strip(),
+        "background_image": (
+            cover if isinstance(cover, str) and cover.startswith("https://") else None
+        ),
+        "deal_id": None,
+        "sale_price": None,
+    }
+
+    deals = payload.get("deals")
+    if not isinstance(deals, list):
+        return result
+    valid_deals = []
+    for deal in deals:
+        if not isinstance(deal, dict):
+            continue
+        deal_id = deal.get("dealID")
+        sale_price = _parse_price(deal.get("price"))
+        if (
+            isinstance(deal_id, str)
+            and deal_id
+            and sale_price is not None
+        ):
+            valid_deals.append((sale_price, deal_id))
+    if valid_deals:
+        sale_price, deal_id = min(valid_deals, key=lambda item: (item[0], item[1]))
+        result["deal_id"] = deal_id
+        result["sale_price"] = sale_price
+    return result
+
+
 def fetch_promotions() -> list[dict[str, Any]]:
     payload = _get_json(
         f"{CHEAPSHARK_API_BASE}/deals",

@@ -23,8 +23,80 @@ def response(status_code: int, payload: object) -> Mock:
 
 class AuthenticationAppTests(unittest.TestCase):
     def run_app(self, app: AppTest, *, timeout: float = 10) -> AppTest:
-        with patch.dict(os.environ, {"XANO_API_BASE_URL": API_URL}):
+        with patch.dict(
+            os.environ,
+            {
+                "XANO_API_BASE_URL": API_URL,
+                "TWITCH_CLIENT_ID": "test-client-id",
+                "TWITCH_CLIENT_SECRET": "test-client-secret",
+            },
+        ):
             return app.run(timeout=timeout)
+
+    @patch("app.load_dotenv")
+    @patch("requests.post")
+    def test_igdb_search_authenticates_with_twitch_and_normalizes_games(
+        self, post: Mock, load_dotenv: Mock
+    ) -> None:
+        import app as app_module
+
+        app_module.buscar_jogos_igdb.clear()
+        post.side_effect = [
+            response(200, {"access_token": "test-access-token"}),
+            response(
+                200,
+                [
+                    {
+                        "id": 123,
+                        "name": "Hades",
+                        "cover": {"image_id": "cover_hades"},
+                    }
+                ],
+            ),
+        ]
+        with patch.dict(
+            os.environ,
+            {
+                "TWITCH_CLIENT_ID": "test-client-id",
+                "TWITCH_CLIENT_SECRET": "test-client-secret",
+            },
+        ):
+            games = app_module.buscar_jogos_igdb(' Hades "II" ')
+
+        load_dotenv.assert_called_once_with(APP_PATH.with_name(".env"))
+        self.assertEqual(
+            post.call_args_list[0].kwargs["data"],
+            {
+                "client_id": "test-client-id",
+                "client_secret": "test-client-secret",
+                "grant_type": "client_credentials",
+            },
+        )
+        self.assertEqual(
+            post.call_args_list[1].kwargs["headers"],
+            {
+                "Client-ID": "test-client-id",
+                "Authorization": "Bearer test-access-token",
+            },
+        )
+        self.assertIn(
+            'search "Hades \\"II\\"";',
+            post.call_args_list[1].kwargs["data"],
+        )
+        self.assertEqual(
+            games,
+            [
+                {
+                    "id": 123,
+                    "name": "Hades",
+                    "cover": {"image_id": "cover_hades"},
+                    "background_image": (
+                        "https://images.igdb.com/igdb/image/upload/"
+                        "t_cover_big/cover_hades.jpg"
+                    ),
+                }
+            ],
+        )
 
     def test_authentication_forms_are_available(self) -> None:
         app = self.run_app(AppTest.from_file(str(APP_PATH)))
@@ -160,7 +232,7 @@ class AuthenticationAppTests(unittest.TestCase):
         self.assertEqual(app.exception, [])
 
     @patch("requests.Session.request")
-    def test_selected_game_shows_review_form_without_external_description(
+    def test_selected_game_shows_cover_description_rating_and_review_form(
         self, request: Mock
     ) -> None:
         request.side_effect = [
@@ -188,12 +260,32 @@ class AuthenticationAppTests(unittest.TestCase):
             "id": "3498",
             "name": "God of War",
             "background_image": "https://images.example/god-of-war.jpg",
+            "summary": "Kratos and Atreus journey through Norse realms.",
         }
         self.run_app(app)
 
         self.assertEqual(app.exception, [])
-        self.assertFalse(any("Sobre o jogo" in item.value for item in app.subheader))
+        self.assertTrue(any("Sobre o jogo" in item.value for item in app.subheader))
         self.assertTrue(any("God of War" in item.value for item in app.title))
+        self.assertTrue(
+            any(
+                "Kratos and Atreus journey through Norse realms." in item.value
+                for item in app.markdown
+            )
+        )
+        self.assertTrue(
+            any(
+                "Nota atual no site: 4,5/5 · 2 avaliação(ões)" in item.value
+                for item in app.caption
+            )
+        )
+        self.assertTrue(
+            any(
+                image.proto.imgs[0].url
+                == "https://images.example/god-of-war.jpg"
+                for image in app.image
+            )
+        )
         self.assertEqual(app.text_area[0].label, "Comentário")
         self.assertTrue(any(button.label == "Enviar avaliação" for button in app.button))
         self.assertTrue(any("May" in item.value for item in app.markdown))
@@ -240,8 +332,9 @@ class AuthenticationAppTests(unittest.TestCase):
         )
 
     @patch("requests.Session.request")
+    @patch("requests.post")
     def test_my_reviews_shows_only_authenticated_user_reviews(
-        self, request: Mock
+        self, post: Mock, request: Mock
     ) -> None:
         def respond(method: str, url: str, **kwargs: object) -> Mock:
             if url.endswith("/auth/me"):
@@ -271,7 +364,21 @@ class AuthenticationAppTests(unittest.TestCase):
         app = AppTest.from_file(str(APP_PATH))
         app.session_state["auth_token"] = "session-token"
         app_module = __import__("app")
-        app_module.buscar_capa_jogo_cheapshark.clear()
+        app_module.buscar_capa_jogo_igdb.clear()
+        app_module.buscar_jogos_igdb.clear()
+        post.side_effect = [
+            response(200, {"access_token": "test-access-token"}),
+            response(
+                200,
+                [
+                    {
+                        "id": 123,
+                        "name": "God of War",
+                        "cover": {"image_id": "god_of_war"},
+                    }
+                ],
+            ),
+        ]
 
         with patch(
             "requests.get",
@@ -287,7 +394,7 @@ class AuthenticationAppTests(unittest.TestCase):
                     }
                 ],
             ),
-        ) as cheapshark_request:
+        ):
             self.run_app(app)
             my_reviews_button = next(
                 button
@@ -310,7 +417,10 @@ class AuthenticationAppTests(unittest.TestCase):
         self.assertTrue(
             any(
                 image.proto.imgs[0].url
-                == "https://images.example/god-of-war.jpg"
+                == (
+                    "https://images.igdb.com/igdb/image/upload/"
+                    "t_cover_big/god_of_war.jpg"
+                )
                 for image in app.image
             )
         )
@@ -321,13 +431,13 @@ class AuthenticationAppTests(unittest.TestCase):
         self.assertTrue(my_reviews_request.kwargs["headers"]["Authorization"])
         game_requests = [
             call
-            for call in cheapshark_request.call_args_list
+            for call in post.call_args_list
             if call.args[0].endswith("/games")
         ]
         self.assertEqual(len(game_requests), 1)
         self.assertEqual(
-            game_requests[0].kwargs["params"],
-            {"title": "God of War"},
+            game_requests[0].kwargs["headers"]["Authorization"],
+            "Bearer test-access-token",
         )
 
     @patch("requests.Session.request")
@@ -424,7 +534,7 @@ class AuthenticationAppTests(unittest.TestCase):
         )
         self.assertTrue(
             any(
-                "Média da comunidade: 5,0/5 · 1 avaliação(ões)" in item.value
+                "Nota atual no site: 5,0/5 · 1 avaliação(ões)" in item.value
                 for item in app.caption
             )
         )
@@ -481,9 +591,8 @@ class AuthenticationAppTests(unittest.TestCase):
 
     @patch("requests.Session.request")
     @patch("requests.get")
-    def test_game_catalog_uses_cheapshark_and_converts_prices(
-        self, get: Mock, request: Mock
-    ) -> None:
+    @patch("requests.post")
+    def test_game_catalog_uses_igdb(self, post: Mock, get: Mock, request: Mock) -> None:
         def respond(method: str, url: str, **kwargs: object) -> Mock:
             if url.endswith("/auth/me"):
                 return response(
@@ -511,22 +620,16 @@ class AuthenticationAppTests(unittest.TestCase):
                     200,
                     {"date": "2026-11-09", "rates": {"BRL": 5}},
                 )
-            if url.endswith("/games"):
-                return response(
-                    200,
-                    [
-                        {
-                            "gameID": "196149",
-                            "external": "Hades",
-                            "thumb": "https://images.example/hades.jpg",
-                            "cheapest": "24.99",
-                            "cheapestDealID": "deal-id",
-                        }
-                    ],
-                )
             self.fail(f"Unexpected external API request: {url}")
 
         get.side_effect = get_external
+        post.side_effect = [
+            response(200, {"access_token": "test-access-token"}),
+            response(
+                200,
+                [{"id": 123, "name": "Hades", "cover": {"image_id": "hades"}}],
+            ),
+        ]
         app = AppTest.from_file(str(APP_PATH))
         app.session_state["auth_token"] = "session-token"
         st.cache_data.clear()
@@ -536,12 +639,9 @@ class AuthenticationAppTests(unittest.TestCase):
         self.run_app(app)
 
         self.assertEqual(app.exception, [])
-        cheapest_price = next(
-            metric.value
-            for metric in app.metric
-            if metric.label == "Menor preço encontrado"
+        self.assertFalse(
+            any(metric.label == "Menor preço encontrado" for metric in app.metric)
         )
-        self.assertEqual(cheapest_price, "R$ 124,95")
         evaluation_button = next(
             button for button in app.button if button.label == "Fazer avaliação"
         )
@@ -551,14 +651,15 @@ class AuthenticationAppTests(unittest.TestCase):
         self.assertIn("Sua avaliação", [item.value for item in app.subheader])
         self.assertTrue(
             any(
-                "Média da comunidade: 4,5/5 · 10 avaliação(ões)" in item.value
+                "Nota atual no site: 4,5/5 · 10 avaliação(ões)" in item.value
                 for item in app.caption
             )
         )
         self.assertEqual(app.text_area[0].label, "Comentário")
         self.assertTrue(
             any(
-                image.proto.imgs[0].url == "https://images.example/hades.jpg"
+                image.proto.imgs[0].url
+                == "https://images.igdb.com/igdb/image/upload/t_cover_big/hades.jpg"
                 for image in app.image
             )
         )
@@ -581,7 +682,7 @@ class AuthenticationAppTests(unittest.TestCase):
             )
         )
         game_searches = [
-            call for call in get.call_args_list if call.args[0].endswith("/games")
+            call for call in post.call_args_list if call.args[0].endswith("/games")
         ]
         self.assertEqual(len(game_searches), 1)
 
@@ -952,6 +1053,154 @@ class AuthenticationAppTests(unittest.TestCase):
                 for call in request.call_args_list
                 if len(call.args) > 1
             )
+        )
+
+
+    @patch("requests.Session.request")
+    @patch("requests.post")
+    def test_compatibility_page_saves_preferences_and_shows_explainable_results(
+        self, post: Mock, request: Mock
+    ) -> None:
+        def respond(method: str, url: str, **kwargs: object) -> Mock:
+            if url.endswith("/auth/me"):
+                return response(
+                    200,
+                    {"id": 7, "name": "Jogador", "email": "user@example.com"},
+                )
+            if url.endswith("/compatibilidade/preferencias") and method == "GET":
+                return response(200, {"preferencias": None})
+            if url.endswith("/compatibilidade/preferencias") and method == "PUT":
+                return response(200, {"preferencias": kwargs["json"]})
+            self.fail(f"Unexpected API request: {method} {url}")
+
+        request.side_effect = respond
+        post.side_effect = [
+            response(200, {"access_token": "igdb-test-token"}),
+            response(
+                200,
+                [
+                    {
+                        "id": 11,
+                        "slug": "hades",
+                        "name": "Hades",
+                        "summary": "Um roguelike de ação com progressão entre partidas.",
+                        "cover": {"image_id": "hades-cover"},
+                        "genres": [{"name": "Action"}],
+                        "themes": [{"name": "Fantasy"}],
+                        "game_modes": [{"name": "Single player"}],
+                        "platforms": [{"name": "PC (Microsoft Windows)"}],
+                    }
+                ],
+            ),
+        ]
+        app = AppTest.from_file(str(APP_PATH))
+        app.session_state["auth_token"] = "session-token"
+        app.session_state["pagina"] = "compatibilidade"
+        __import__("app").buscar_catalogo_compatibilidade_igdb.clear()
+        self.run_app(app)
+
+        self.assertEqual(app.exception, [])
+        self.assertIn(
+            "Inteligência de Compatibilidade",
+            [item.value for item in app.title],
+        )
+        app.multiselect(key="compatibility_genres").set_value(["Action"])
+        app.multiselect(key="compatibility_styles").set_value(["Fantasy"])
+        submit_button = next(
+            button
+            for button in app.button
+            if button.label == "Salvar e ver recomendações"
+        )
+        self.run_app(submit_button.click())
+
+        self.assertEqual(app.exception, [])
+        self.assertIn(
+            "Preferências salvas na sua conta.",
+            [item.value for item in app.success],
+        )
+        self.assertEqual(
+            app.session_state["compatibility_preferences"]["generos"],
+            ["Action"],
+        )
+        self.assertEqual(app.session_state["compatibility_results"][0].score, 100)
+        self.assertTrue(any("Hades" in item.value for item in app.subheader))
+        self.assertTrue(any("Temas: Fantasy" in item.value for item in app.caption))
+        self.assertTrue(
+            any(
+                image.proto.imgs[0].url
+                == "https://images.igdb.com/igdb/image/upload/"
+                "t_cover_big/hades-cover.jpg"
+                for image in app.image
+            )
+        )
+        self.assertTrue(any("100%" == item.value for item in app.metric))
+        self.assertTrue(
+            any(
+                "Cobertura dos dados avaliados: 100%" in item.value
+                for item in app.caption
+            )
+        )
+        self.assertTrue(
+            any(
+                call.args[1].endswith("/compatibilidade/preferencias")
+                and call.args[0] == "PUT"
+                for call in request.call_args_list
+            )
+        )
+        self.assertFalse(
+            any(
+                call.args[1].endswith("/compatibilidade/catalogo")
+                for call in request.call_args_list
+            )
+        )
+        catalog_request = next(
+            call
+            for call in post.call_args_list
+            if call.args[0].endswith("/games")
+        )
+        self.assertIn("genres.name", catalog_request.kwargs["data"])
+        self.assertIn("themes.name", catalog_request.kwargs["data"])
+        self.assertIn("game_modes.name", catalog_request.kwargs["data"])
+        self.assertIn("platforms.name", catalog_request.kwargs["data"])
+
+    @patch("requests.Session.request")
+    @patch("requests.post")
+    def test_compatibility_save_failure_does_not_claim_success(
+        self, post: Mock, request: Mock
+    ) -> None:
+        def respond(method: str, url: str, **kwargs: object) -> Mock:
+            if url.endswith("/auth/me"):
+                return response(
+                    200,
+                    {"id": 7, "name": "Jogador", "email": "user@example.com"},
+                )
+            if url.endswith("/compatibilidade/preferencias") and method == "GET":
+                return response(200, {"preferencias": None})
+            if url.endswith("/compatibilidade/preferencias") and method == "PUT":
+                return response(500, {"message": "database unavailable"})
+            self.fail(f"Unexpected API request: {method} {url}")
+
+        request.side_effect = respond
+        post.side_effect = [
+            response(200, {"access_token": "igdb-test-token"}),
+            response(200, []),
+        ]
+        app = AppTest.from_file(str(APP_PATH))
+        app.session_state["auth_token"] = "session-token"
+        app.session_state["pagina"] = "compatibilidade"
+        __import__("app").buscar_catalogo_compatibilidade_igdb.clear()
+        self.run_app(app)
+        save_button = next(
+            button for button in app.button if button.label == "Salvar preferências"
+        )
+        self.run_app(save_button.click())
+
+        self.assertEqual(app.exception, [])
+        self.assertTrue(app.error)
+        self.assertFalse(app.success)
+        self.assertEqual(
+            app.session_state["compatibility_preferences"]["generos"],
+            [],
         )
 
 

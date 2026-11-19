@@ -9,7 +9,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
-from ggreviews.config import validate_api_base_url
+from ggreviews.config import validate_api_base_url, validate_rating_averages_url
 from ggreviews.game_compatibility import CATEGORY_FIELDS, normalize_preferences
 
 
@@ -37,10 +37,16 @@ class AuthAPI:
         self,
         api_base_url: str,
         *,
+        rating_averages_url: str | None = None,
         timeout: float = 10,
         session: requests.Session | None = None,
     ) -> None:
         self._api_base_url = validate_api_base_url(api_base_url)
+        self._rating_averages_url = (
+            validate_rating_averages_url(rating_averages_url)
+            if rating_averages_url is not None
+            else f"{self._api_base_url}/avaliacoes/medias"
+        )
         self._timeout = timeout
         self._session = session or requests.Session()
 
@@ -120,6 +126,7 @@ class AuthAPI:
             payload={"nomes_jogo": normalized_names},
             token=token,
             failure_message="Não foi possível carregar as médias das avaliações.",
+            endpoint_url=self._rating_averages_url,
         )
         averages = response.get("medias")
         if not isinstance(averages, list):
@@ -451,6 +458,7 @@ class AuthAPI:
         failure_message: str,
         files: dict[str, tuple[str, bytes, str]] | None = None,
         params: dict[str, Any] | None = None,
+        endpoint_url: str | None = None,
     ) -> dict[str, Any]:
         headers = {"Accept": "application/json"}
         service_name = (
@@ -475,7 +483,11 @@ class AuthAPI:
                 request_options["files"] = files
             response = self._session.request(
                 method,
-                f"{self._api_base_url}/{path}",
+                (
+                    endpoint_url
+                    if endpoint_url is not None
+                    else f"{self._api_base_url}/{path}"
+                ),
                 **request_options,
             )
         except requests.Timeout:

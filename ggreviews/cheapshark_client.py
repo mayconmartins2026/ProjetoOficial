@@ -11,6 +11,7 @@ import requests
 CHEAPSHARK_API_BASE = "https://www.cheapshark.com/api/1.0"
 EXCHANGE_RATE_URL = "https://api.frankfurter.app/latest"
 REQUEST_HEADERS = {"User-Agent": "GGReviews/1.0"}
+FANATICAL_STORE_ID = "15"
 
 
 def _get_json(url: str, *, params: dict[str, Any] | None = None) -> Any:
@@ -144,6 +145,7 @@ def fetch_promotions() -> list[dict[str, Any]]:
             "pageSize": 60,
             "sortBy": "Savings",
             "desc": 1,
+            "storeID": FANATICAL_STORE_ID,
         },
     )
     if not isinstance(payload, list):
@@ -164,11 +166,11 @@ def fetch_promotions() -> list[dict[str, Any]]:
             or not isinstance(deal_id, str)
             or not deal_id
             or not isinstance(store_id, str)
-            or not store_id.isdigit()
+            or store_id != FANATICAL_STORE_ID
             or sale_price is None
             or normal_price is None
             or normal_price == 0
-            or sale_price > normal_price
+            or sale_price >= normal_price
         ):
             continue
 

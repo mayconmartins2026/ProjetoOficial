@@ -12,7 +12,13 @@ from ggreviews.auth_client import (
     email_validation_error,
     password_policy_error,
 )
-from ggreviews.config import ConfigurationError, load_auth_config, validate_api_base_url
+from ggreviews.config import (
+    DEFAULT_RATING_AVERAGES_URL,
+    ConfigurationError,
+    load_auth_config,
+    validate_api_base_url,
+    validate_rating_averages_url,
+)
 
 
 class AuthClientTests(unittest.TestCase):
@@ -178,6 +184,23 @@ class AuthClientTests(unittest.TestCase):
         self.assertTrue(request.kwargs["headers"]["Authorization"])
         self.assertEqual(result["hades"].average, Decimal("4.5"))
         self.assertEqual(result["hades"].total, 12)
+
+    def test_game_rating_averages_uses_configured_xano_endpoint(self) -> None:
+        api = AuthAPI(
+            "https://auth.xano.io/api:Authentication",
+            rating_averages_url=(
+                "https://ratings.xano.io/api:Games/avaliacoes/medias"
+            ),
+            session=self.session,
+        )
+        self.session.request.return_value = self.response(200, {"medias": []})
+
+        api.game_rating_averages("secret-token", ["Hades"])
+
+        self.assertEqual(
+            self.session.request.call_args.args[1],
+            "https://ratings.xano.io/api:Games/avaliacoes/medias",
+        )
 
     def test_game_rating_averages_empty_input_does_not_call_api(self) -> None:
         self.assertEqual(self.api.game_rating_averages("secret-token", ["  "]), {})
@@ -503,6 +526,31 @@ class ConfigTests(unittest.TestCase):
         )
 
         self.assertEqual(config.api_base_url, "https://secrets.xano.io/api:Group")
+        self.assertEqual(
+            config.rating_averages_url,
+            DEFAULT_RATING_AVERAGES_URL,
+        )
+
+    def test_rating_endpoint_environment_value_overrides_streamlit_secrets(self) -> None:
+        config = load_auth_config(
+            secrets={
+                "XANO_API_BASE_URL": "https://auth.xano.io/api:Auth",
+                "XANO_RATING_AVERAGES_URL": (
+                    "https://secrets.xano.io/api:Games/avaliacoes/medias"
+                ),
+            },
+            environ={
+                "XANO_API_BASE_URL": "https://env.xano.io/api:Auth",
+                "XANO_RATING_AVERAGES_URL": (
+                    "https://env.xano.io/api:Games/avaliacoes/medias"
+                ),
+            },
+        )
+
+        self.assertEqual(
+            config.rating_averages_url,
+            "https://env.xano.io/api:Games/avaliacoes/medias",
+        )
 
     def test_missing_api_url_is_an_explicit_error(self) -> None:
         with self.assertRaises(ConfigurationError):
@@ -517,6 +565,16 @@ class ConfigTests(unittest.TestCase):
             validate_api_base_url("http://localhost:9000/api:Group"),
             "http://localhost:9000/api:Group",
         )
+
+    def test_rejects_rating_url_that_does_not_target_averages_endpoint(self) -> None:
+        with self.assertRaises(ConfigurationError):
+            validate_rating_averages_url("https://example.xano.io/api:Group/reviews")
+
+    def test_rejects_rating_url_with_query_parameters(self) -> None:
+        with self.assertRaises(ConfigurationError):
+            validate_rating_averages_url(
+                "https://example.xano.io/api:Group/avaliacoes/medias?all=true"
+            )
 
 
 if __name__ == "__main__":

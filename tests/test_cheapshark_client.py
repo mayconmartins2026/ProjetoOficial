@@ -10,6 +10,7 @@ import requests
 from ggreviews.cheapshark_client import (
     CHEAPSHARK_API_BASE,
     EXCHANGE_RATE_URL,
+    FANATICAL_STORE_ID,
     fetch_game_details,
     fetch_promotions,
     fetch_store_names,
@@ -120,12 +121,20 @@ class CheapSharkClientTests(unittest.TestCase):
                 {
                     "title": "Game",
                     "dealID": "deal-id",
-                    "storeID": "1",
+                    "storeID": FANATICAL_STORE_ID,
                     "salePrice": "4.99",
                     "normalPrice": "9.99",
                     "savings": "50.050050",
                     "isOnSale": "1",
                     "thumb": "https://images.example/game.jpg",
+                },
+                {
+                    "title": "Game at GameBillet",
+                    "dealID": "gamebillet-deal",
+                    "storeID": "23",
+                    "salePrice": "0.99",
+                    "normalPrice": "9.99",
+                    "isOnSale": "1",
                 },
                 {
                     "title": "Not on sale",
@@ -135,6 +144,15 @@ class CheapSharkClientTests(unittest.TestCase):
                     "normalPrice": "9.99",
                     "savings": "0",
                     "isOnSale": "0",
+                },
+                {
+                    "title": "No real discount",
+                    "dealID": "same-price-deal",
+                    "storeID": "3",
+                    "salePrice": "8.99",
+                    "normalPrice": "8.99",
+                    "savings": "0",
+                    "isOnSale": "1",
                 },
             ]
         )
@@ -147,7 +165,13 @@ class CheapSharkClientTests(unittest.TestCase):
         self.assertAlmostEqual(float(promotions[0]["savings"]), 50.05005, places=5)
         get.assert_called_once_with(
             f"{CHEAPSHARK_API_BASE}/deals",
-            params={"onSale": 1, "pageSize": 60, "sortBy": "Savings", "desc": 1},
+            params={
+                "onSale": 1,
+                "pageSize": 60,
+                "sortBy": "Savings",
+                "desc": 1,
+                "storeID": FANATICAL_STORE_ID,
+            },
             headers={"User-Agent": "GGReviews/1.0"},
             timeout=10,
         )

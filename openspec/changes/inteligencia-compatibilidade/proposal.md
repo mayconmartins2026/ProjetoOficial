@@ -12,10 +12,10 @@ reduzir buscas genéricas e tornar as recomendações mais úteis e confiáveis.
 - Adicionar uma área autenticada do Streamlit chamada **Inteligência de
   Compatibilidade**, preservando as telas e os fluxos existentes.
 - Coletar e permitir atualizar preferências de gêneros, temas, modos de jogo e
-  plataformas a partir das características disponíveis no IGDB.
+  plataformas a partir das características disponíveis no IGDB ou twitch id.
 - Salvar e recuperar as preferências da conta autenticada por endpoints Xano.
 - Recomendar jogos a partir de gêneros, temas, modos e plataformas retornados
-  pelo IGDB, com pontuação determinística e explicável.
+  pelo IGDB ou twitch id, com pontuação determinística e explicável.
 - Apresentar capa, nome, gênero, descrição, percentual, justificativa e
   cobertura dos metadados usados no cálculo.
 - Manter no Xano somente o perfil privado de preferências por conta autenticada;
@@ -25,7 +25,7 @@ reduzir buscas genéricas e tornar as recomendações mais úteis e confiáveis.
 
 ### New Capabilities
 
-- `game-compatibility`: coleta e persistência de preferências, catálogo IGDB,
+- `game-compatibility`: coleta e persistência de preferências, catálogo IGDB ou twitch id,
   pontuação determinística e apresentação explicável de recomendações.
 
 ### Modified Capabilities

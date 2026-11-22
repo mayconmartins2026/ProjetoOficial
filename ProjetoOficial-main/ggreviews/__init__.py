@@ -1,0 +1,1 @@
+"""GGReviews application package."""

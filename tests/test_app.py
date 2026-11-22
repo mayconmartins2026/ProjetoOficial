@@ -284,6 +284,13 @@ class AuthenticationAppTests(unittest.TestCase):
             "Se houver uma conta associada a esse e-mail, você receberá um link de recuperação.",
             [message.value for message in app.success],
         )
+        call = request.call_args
+        self.assertEqual(
+            call.args[:2],
+            ("POST", f"{API_URL}/reset/request-reset-link"),
+        )
+        self.assertEqual(call.kwargs["json"], {"email": "user@example.com"})
+        self.assertEqual(call.kwargs["headers"], {"Accept": "application/json"})
 
     @patch("requests.Session.request")
     def test_reset_link_is_removed_from_url_and_completes_reset(

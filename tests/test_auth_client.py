@@ -472,6 +472,7 @@ class AuthClientTests(unittest.TestCase):
         request = self.session.request.call_args
         self.assertEqual(request.args[:2], ("POST", "https://example.xano.io/api:ZnpRG7wg/reset/request-reset-link"))
         self.assertEqual(request.kwargs["json"], {"email": "user@example.com"})
+        self.assertEqual(request.kwargs["headers"], {"Accept": "application/json"})
         self.assertNotIn("user@example.com", request.args[1])
 
     def test_complete_password_reset_sends_one_time_link_fields(self) -> None:
@@ -483,11 +484,37 @@ class AuthClientTests(unittest.TestCase):
             "one-time-token", "USER@example.com", "Password1", "Password1"
         )
 
-        request = self.session.request.call_args.kwargs
-        self.assertEqual(request["json"]["email"], "user@example.com")
-        self.assertEqual(request["json"]["magic_token"], "one-time-token")
-        reset_url = self.session.request.call_args.args[1]
-        self.assertEqual(reset_url.split("/")[-1], "complete")
+        call = self.session.request.call_args
+        self.assertEqual(
+            call.args[:2],
+            (
+                "POST",
+                "https://example.xano.io/api:ZnpRG7wg/reset/complete",
+            ),
+        )
+        self.assertEqual(
+            call.kwargs["json"],
+            {
+                "magic_token": "one-time-token",
+                "email": "user@example.com",
+                "password": "Password1",
+                "confirm_password": "Password1",
+            },
+        )
+        self.assertEqual(call.kwargs["headers"], {"Accept": "application/json"})
+
+    def test_invalid_reset_link_does_not_expose_backend_details(self) -> None:
+        self.session.request.return_value = self.response(
+            401, {"error": "secret token has expired"}
+        )
+
+        with self.assertRaises(AuthAPIError) as raised:
+            self.api.complete_password_reset(
+                "one-time-token", "user@example.com", "Password1", "Password1"
+            )
+
+        self.assertEqual(raised.exception.code, "invalid_reset_link")
+        self.assertNotIn("secret token", raised.exception.message)
 
     def test_timeout_does_not_surface_transport_details(self) -> None:
         self.session.request.side_effect = requests.Timeout("token=secret-token")

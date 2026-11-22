@@ -75,16 +75,89 @@ def _capture_password_reset_link() -> None:
         st.session_state["password_reset_link"] = None
 
 
+def _render_auth_styles() -> None:
+    st.markdown(
+        """
+        <style>
+        .st-key-auth-screen {
+            min-height: calc(100vh - 3.5rem);
+            position: relative;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+        .st-key-auth-brand {
+            position: absolute;
+            top: 0.5rem;
+            left: 50%;
+            width: max-content;
+            max-width: calc(100vw - 2rem);
+            transform: translateX(-50%);
+        }
+        .auth-brand-logo {
+            font-size: 2.5rem;
+            font-weight: 800;
+            letter-spacing: -0.04em;
+            line-height: 1;
+        }
+        .auth-brand-accent {
+            color: #f43f5e;
+        }
+        .st-key-auth-panel {
+            width: min(544px, calc(100vw - 2rem)) !important;
+            padding: 0.75rem 1rem 1rem !important;
+            border: 1px solid rgba(255, 255, 255, 0.3) !important;
+            border-radius: 14px !important;
+            background: rgba(31, 35, 54, 0.68) !important;
+            backdrop-filter: blur(16px);
+        }
+        .st-key-auth-panel [data-testid="stForm"] {
+            border: 0;
+            background: transparent;
+            padding: 0;
+        }
+        .st-key-auth-panel [data-testid="stTextInput"] input {
+            border: 1px solid rgba(203, 213, 225, 0.32);
+            border-radius: 10px;
+            background: rgba(10, 13, 28, 0.76);
+        }
+        .st-key-auth-panel [data-testid="stTextInput"] input:focus {
+            border-color: rgba(255, 255, 255, 0.58);
+            box-shadow: 0 0 0 1px rgba(244, 63, 94, 0.32);
+        }
+        .st-key-auth-panel [data-testid="stFormSubmitButton"] button {
+            width: 100%;
+            min-height: 3rem;
+            border: 0;
+            border-radius: 999px;
+            background: linear-gradient(90deg, #a20d32, #f12640);
+            color: #fff;
+            font-weight: 700;
+        }
+        .st-key-auth-panel [data-testid="stFormSubmitButton"] button:hover {
+            background: linear-gradient(90deg, #ba123c, #ff344d);
+            color: #fff;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def _render_password_reset(api: AuthAPI, link: dict[str, str]) -> None:
-    st.subheader("Redefinir senha")
-    with st.form("complete_password_reset"):
-        password = st.text_input("Nova senha", type="password")
-        confirm_password = st.text_input("Confirme a nova senha", type="password")
-        submitted = st.form_submit_button(
-            "Salvar nova senha",
-            type="primary",
-            width="stretch",
-        )
+    _render_auth_styles()
+    with st.container(key="auth-screen"):
+        with st.container(width=544, border=True, key="auth-panel"):
+            st.subheader("Redefinir senha")
+            with st.form("complete_password_reset"):
+                password = st.text_input("Nova senha", type="password")
+                confirm_password = st.text_input("Confirme a nova senha", type="password")
+                submitted = st.form_submit_button(
+                    "Salvar nova senha",
+                    type="primary",
+                    width="stretch",
+                )
 
     if not submitted:
         return
@@ -215,73 +288,7 @@ def _render_recovery(api: AuthAPI) -> None:
 
 
 def _render_auth_forms(api: AuthAPI) -> None:
-    st.markdown(
-        """
-        <style>
-        .st-key-auth-screen {
-            min-height: calc(100vh - 3.5rem);
-            position: relative;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-        }
-        .st-key-auth-brand {
-            position: absolute;
-            top: 0.5rem;
-            left: 50%;
-            width: max-content;
-            max-width: calc(100vw - 2rem);
-            transform: translateX(-50%);
-        }
-        .auth-brand-logo {
-            font-size: 2.5rem;
-            font-weight: 800;
-            letter-spacing: -0.04em;
-            line-height: 1;
-        }
-        .auth-brand-accent {
-            color: #f43f5e;
-        }
-        .st-key-auth-panel {
-            width: min(544px, calc(100vw - 2rem)) !important;
-            padding: 0.75rem 1rem 1rem !important;
-            border: 1px solid rgba(255, 255, 255, 0.3) !important;
-            border-radius: 14px !important;
-            background: rgba(31, 35, 54, 0.68) !important;
-            backdrop-filter: blur(16px);
-        }
-        .st-key-auth-panel [data-testid="stForm"] {
-            border: 0;
-            background: transparent;
-            padding: 0;
-        }
-        .st-key-auth-panel [data-testid="stTextInput"] input {
-            border: 1px solid rgba(203, 213, 225, 0.32);
-            border-radius: 10px;
-            background: rgba(10, 13, 28, 0.76);
-        }
-        .st-key-auth-panel [data-testid="stTextInput"] input:focus {
-            border-color: rgba(255, 255, 255, 0.58);
-            box-shadow: 0 0 0 1px rgba(244, 63, 94, 0.32);
-        }
-        .st-key-auth-panel [data-testid="stFormSubmitButton"] button {
-            width: 100%;
-            min-height: 3rem;
-            border: 0;
-            border-radius: 999px;
-            background: linear-gradient(90deg, #a20d32, #f12640);
-            color: #fff;
-            font-weight: 700;
-        }
-        .st-key-auth-panel [data-testid="stFormSubmitButton"] button:hover {
-            background: linear-gradient(90deg, #ba123c, #ff344d);
-            color: #fff;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+    _render_auth_styles()
     with st.container(key="auth-screen"):
         with st.container(key="auth-brand"):
             st.markdown(

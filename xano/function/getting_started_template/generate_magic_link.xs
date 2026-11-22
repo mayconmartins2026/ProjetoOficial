@@ -1,7 +1,9 @@
 // This function generates a magic token with a 60 minute expiration date.
 function "Getting Started Template/generate_magic_link" {
   input {
-    email email?
+    email email? filters=trim|lower {
+      sensitive = true
+    }
   }
 
   stack {
@@ -47,6 +49,6 @@ function "Getting Started Template/generate_magic_link" {
   response = {}
     |set:"token":$token
     |set:"email":$updated_password_reset.email
-  tags = ["xano:quick-start"]
+  tags = ["authentication", "password-reset"]
   guid = "mlWa8e5Zbz28OhrRbhJdmPIpbrE"
 }

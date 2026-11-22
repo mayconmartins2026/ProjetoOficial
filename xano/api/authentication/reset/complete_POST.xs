@@ -3,10 +3,21 @@ query "reset/complete" verb=POST {
   api_group = "Authentication"
 
   input {
-    text magic_token filters=trim
-    email email filters=trim|lower
-    text password filters=trim|min:8
-    text confirm_password filters=trim
+    text magic_token filters=trim {
+      sensitive = true
+    }
+
+    email email filters=trim|lower {
+      sensitive = true
+    }
+
+    text password filters=trim|min:8|pattern:"^.*[A-Za-z].*$"|pattern:"^.*[0-9].*$" {
+      sensitive = true
+    }
+
+    text confirm_password filters=trim {
+      sensitive = true
+    }
   }
 
   stack {
@@ -65,16 +76,20 @@ query "reset/complete" verb=POST {
       }
     } as $updated_user
 
-    function.run "Getting Started Template/create_event_log" {
-      input = {
-        user_id   : $user.id
-        account_id: $user.account_id
-        action    : "reset_password"
-        metadata  : {}
+    conditional {
+      if ($user.account_id != null) {
+        function.run "Getting Started Template/create_event_log" {
+          input = {
+            user_id   : $user.id
+            account_id: $user.account_id
+            action    : "reset_password"
+            metadata  : {}
+          }
+        } as $event_log
       }
-    } as $event_log
+    }
   }
 
   response = {message: "Password updated."}
-  tags = ["xano:quick-start"]
+  tags = ["authentication", "password-reset"]
 }

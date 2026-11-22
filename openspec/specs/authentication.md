@@ -21,8 +21,8 @@ Os caminhos abaixo são relativos a essa URL base:
 | `POST /auth/signup` | Pública | Recebe `name`, `email` e `password`; cria a conta e retorna `authToken` e `user_id`. |
 | `POST /auth/login` | Pública | Recebe `email` e `password`; retorna `authToken` e `user_id` para credenciais válidas. |
 | `GET /auth/me` | Bearer token | Retorna os dados permitidos da conta autenticada. |
-| `POST /reset/request-reset-link` | Pública | Recebe `email`; retorna a mesma confirmação genérica para e-mails cadastrados ou não cadastrados. |
-| `POST /reset/complete` | Pública, com link | Recebe `magic_token`, `email`, `password` e `confirm_password`; valida o link de uso único e atualiza a senha. |
+| `POST /reset/request-reset-link` | Pública | Recebe `{"email":"user@example.com"}`; retorna `{"message":"If an account exists, a reset link has been sent."}` sem revelar se o e-mail está cadastrado. |
+| `POST /reset/complete` | Pública, com link | Recebe `magic_token`, `email`, `password` e `confirm_password`; atualiza a senha se o link for válido e retorna `{"message":"Password updated."}` sem criar sessão autenticada. |
 
 O token retornado por cadastro/login deve ser enviado como `Authorization: Bearer <authToken>` nas chamadas protegidas. O Streamlit não persiste esse token entre sessões.
 
@@ -47,15 +47,15 @@ Não versione `secrets.toml`; a configuração local está excluída pelo `.giti
 
 ## Recuperação por e-mail
 
-O Xano envia o link por SendGrid. Configure estas variáveis de ambiente no Xano, sem colocar os respectivos valores no repositório:
+O Xano envia o link pelo endpoint transacional do Brevo (`POST https://api.brevo.com/v3/smtp/email`), somente ao endereço associado a uma conta. Para envio imediato, o endpoint retorna HTTP `201`; `202` indica envio agendado e não é usado neste fluxo. A solicitação retorna a mesma resposta pública quando o endereço não existe ou quando a entrega falha. O diagnóstico no Xano não inclui endereço, chave, link, senha, token ou outros dados sensíveis. Consulte a [documentação oficial do Brevo](https://developers.brevo.com/reference/send-transac-email). Configure estas variáveis de ambiente no Xano, sem colocar os respectivos valores no repositório:
 
 | Variável Xano | Valor |
 |---|---|
-| `sendgrid_api_key` | Chave SendGrid com permissão de envio de e-mail. |
-| `sendgrid_from_email` | Endereço remetente verificado no SendGrid. |
+| `brevo_api_key` | Chave de API Brevo, enviada pelo cabeçalho `api-key`. |
+| `brevo_from_email` | Endereço remetente verificado no Brevo. |
 | `ggreviews_frontend_url` | URL HTTPS pública da aplicação Streamlit, sem barra final; o Xano acrescenta os parâmetros do link de redefinição. |
 
-O link expira após uma hora e pode ser usado uma única vez. A solicitação de recuperação usa `POST`, para não incluir o e-mail em uma URL. Sem uma conta SendGrid válida, um remetente verificado e a URL pública da interface, o envio de recuperação não funcionará em produção.
+O link expira após uma hora e pode ser usado uma única vez. A conclusão exige `magic_token`, `email`, `password` e `confirm_password`; a nova senha deve ter ao menos oito caracteres, uma letra e um número, e os campos de senha devem corresponder. Links inválidos, expirados ou reutilizados são rejeitados sem alterar a senha. A conclusão não emite token de sessão; a pessoa deve entrar usando a nova senha. Os campos de e-mail, token e senha são marcados como sensíveis nas entradas Xano. A solicitação usa `POST`, para não incluir o e-mail em uma URL. Sem uma chave de API válida, um remetente verificado e a URL pública da interface, o envio de recuperação não funcionará em produção.
 
 ## Testes
 

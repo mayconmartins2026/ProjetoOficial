@@ -49,7 +49,8 @@ Cada mudança deverá ser planejada e revisada antes de sua implementação.
 
 ## 6. Decisões pendentes
 
-- Definir a fonte dos dados dos jogos.
+- A CheapShark é a fonte de busca dos jogos e das ofertas; preços em USD são
+  convertidos para BRL por uma cotação pública e tratados como aproximados.
 - Cadastro e login serão realizados por e-mail e senha no Xano, com interface Streamlit e recuperação via SendGrid; consulte [autenticação](./authentication.md).
 - Definir a escala de notas.
 - Definir se cada usuário poderá publicar uma única review por jogo ou várias.
@@ -63,4 +64,5 @@ Cada mudança deverá ser planejada e revisada antes de sua implementação.
 
 *   **Frontend / Interface:** Streamlit (Python)
 *   **Banco de Dados/BackEnd / APIs Base:** Xano
+*   **Catálogo e ofertas de jogos:** CheapShark API
 *   **Inteligência Artificial:** Google Gemini

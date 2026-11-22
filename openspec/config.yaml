@@ -1,0 +1,6 @@
+Frontend: |
+  Streamlit é a tecnologia obrigatória para implementação
+  das interfaces frontend do projeto.
+
+  Não introduzir outra tecnologia de frontend sem
+  uma mudança explícita da decisão arquitetural.
